@@ -85,7 +85,7 @@ module.exports = function (app, hexo, use) {
             updated.source = newSource;
             updated.published = true;
             updated.layout = 'post';
-            await hexo.store.upsert(updated, permalink);
+            await hexo.store.upsert(updated, permalink, { slug: post.slug, permalink: post.permalink });
             if (hexo.github) {
                 await hexo.github.writeFile(`source/${newSource}`, updated.raw, `Hexo Pro: publish ${newSource}`);
                 await hexo.github.deleteFile(`source/${oldSource}`, `Hexo Pro: publish ${newSource}`);
@@ -111,7 +111,7 @@ module.exports = function (app, hexo, use) {
             updated.source = newSource;
             updated.published = false;
             updated.layout = 'post';
-            await hexo.store.upsert(updated, permalink);
+            await hexo.store.upsert(updated, permalink, { slug: post.slug, permalink: post.permalink });
             if (hexo.github) {
                 await hexo.github.writeFile(`source/${newSource}`, updated.raw, `Hexo Pro: unpublish ${newSource}`);
                 await hexo.github.deleteFile(`source/${oldSource}`, `Hexo Pro: unpublish ${newSource}`);

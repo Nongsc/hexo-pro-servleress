@@ -53,3 +53,31 @@ test('_rebuild 写出 blogInfoList.json 且条目正确', () => {
   assert.equal(page.isDraft, false);
   assert.equal(page.permalink, pageDoc.permalink);
 });
+
+function makeMemDb() {
+  const docs = new Map();
+  return {
+    find(query, cb) { cb(null, Array.from(docs.values())); },
+    update(query, updateDoc, options, cb) {
+      const id = query._id;
+      docs.set(id, Object.assign({}, docs.get(id) || {}, updateDoc.$set || updateDoc));
+      cb(null, 1);
+    },
+    remove(query, options, cb) { docs.delete(query._id); cb(null, 1); },
+  };
+}
+
+test('upsert 冲突改名（preserve）保持 permalink/slug 不变、仅 source 变', async () => {
+  const base_dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexo-'));
+  const store = new ContentStore({ base_dir, config: CONFIG, log: { error: () => {} } }, makeMemDb());
+  const post = parsePost(RAW, '_posts/hello.md', true, CONFIG);
+  const origPermalink = post.permalink;
+  const origSlug = post.slug;
+  await store.upsert(post);
+  const renamed = Object.assign({}, post, { source: '_posts/hello-1699999999999.md', published: true });
+  const saved = await store.upsert(renamed, origPermalink, { slug: origSlug, permalink: origPermalink });
+  assert.equal(saved._id, origPermalink);
+  assert.equal(saved.permalink, origPermalink);
+  assert.equal(saved.slug, origSlug);
+  assert.equal(saved.source, '_posts/hello-1699999999999.md');
+});
