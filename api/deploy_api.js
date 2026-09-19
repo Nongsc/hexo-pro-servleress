@@ -295,7 +295,10 @@ module.exports = function (app, hexo, use, db) {
                                 return res.send(500, '更新部署状态失败');
                             }
                             try {
-                                await updateStatus({ stage: 'deploying', progress: 30 });
+                                // 状态写入失败也不得阻断响应路径，避免客户端请求挂起
+                                await updateStatus({ stage: 'deploying', progress: 30 }).catch((e) => {
+                                    console.error('更新部署进度状态失败:', e);
+                                });
                                 addLog('deploy.triggering');
                                 // 先触发远端 workflow，成功后再响应，避免 serverless 冻结丢失触发
                                 await triggerGithubDeploy(hexo.github, config);
@@ -308,9 +311,12 @@ module.exports = function (app, hexo, use, db) {
                                 executeDeployAsync(config);
                             } catch (triggerErr) {
                                 console.error('执行部署失败:', triggerErr);
-                                await updateStatus({ isDeploying: false, stage: 'failed', error: triggerErr.message });
+                                // 恢复状态写入失败也不得阻断响应，保证客户端一定拿到 500
+                                await updateStatus({ isDeploying: false, stage: 'failed', error: triggerErr.message }).catch((e) => {
+                                    console.error('更新部署失败状态失败:', e);
+                                });
                                 addLog('deploy.failed');
-                                return res.send(500, `执行部署失败: ${triggerErr.message}`);
+                                res.send(500, `执行部署失败: ${triggerErr.message}`);
                             }
                         }
                     );

@@ -30,6 +30,26 @@ function makeDeployStatusDb(initial = {}) {
     };
 }
 
+// 模拟「触发失败后，恢复状态写入也故障」的 DB：任何 stage==='failed' 的写入都回调错误
+function makeDeployStatusDbFailingRecovery(initial = {}) {
+    let status = Object.assign(
+        { type: 'status', isDeploying: false, progress: 0, stage: 'idle', logs: [], error: null },
+        initial
+    );
+    return {
+        getStatus: () => status,
+        findOne: (query, cb) => { cb(null, status); },
+        update: (query, update, opts, cb) => {
+            if (update && update.$set && update.$set.stage === 'failed') {
+                if (cb) cb(new Error('DB 故障'));
+                return;
+            }
+            if (update && update.$set) status = Object.assign({}, status, update.$set);
+            if (cb) cb(null);
+        },
+    };
+}
+
 function registerRoutes(hexo, db) {
     const handlers = {};
     const use = (name, fn) => { handlers[name] = fn; };
@@ -106,4 +126,28 @@ test('deploy/execute：触发失败返回 500（带 error.message）且状态记
     assert.equal(status.isDeploying, false);
     assert.equal(status.stage, 'failed');
     assert.equal(status.error, 'workflow 触发失败');
+});
+
+test('deploy/execute：触发失败且恢复状态写入也故障时，客户端仍拿到 500', { timeout: 2000 }, async () => {
+    const state = { triggerCount: 0, triggeredBeforeDone: false };
+    const deployStatusDb = makeDeployStatusDbFailingRecovery();
+    const hexo = {
+        siteConfig: makeSiteConfig({ deploy: JSON.stringify({ workflowId: 'deploy.yml', branch: 'main' }) }),
+        github: {
+            triggerWorkflow: async () => {
+                state.triggerCount += 1;
+                throw new Error('workflow 触发失败');
+            },
+        },
+    };
+    const db = { deployStatusDb };
+    const handlers = registerRoutes(hexo, db);
+    const res = fakeRes(state);
+
+    handlers['deploy/execute']({ method: 'POST', body: {} }, res, () => {});
+    await res.donePromise;
+
+    assert.equal(res._send[0], 500, '恢复状态写入失败也不得阻断响应，客户端必须拿到 500');
+    assert.match(res._send[1], /workflow 触发失败/);
+    assert.equal(res._done, undefined, '触发失败不应 res.done 成功响应');
 });
