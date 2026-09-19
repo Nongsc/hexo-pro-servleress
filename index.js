@@ -21,84 +21,58 @@ const path = require('path');
 const fs = require('fs');
 const express = require('express');
 const { buildConfig } = require('./lib/config');
-const HexoShim = require('./lib/hexo-shim');
-const databaseManager = require('./lib/db');
-const git = require('./lib/git');
 
 async function main() {
   const cfg = buildConfig(process.env);
-  const contentDir = cfg.contentDir;
+  const databaseManager = require('./lib/db');
+  const { GitHubClient } = require('./lib/github');
+  const { SiteConfigStore } = require('./lib/site-config');
+  const { ContentStore, parsePost, parsePage } = require('./lib/content-store');
+  const HexoShim = require('./lib/hexo-shim');
+  const yaml = require('js-yaml');
 
-  // 1. Ensure the content directory exists (git repo: clone remote if empty).
-  console.log(`[Hexo Pro]: content dir = ${contentDir}`);
-  const repo = await git.ensureRepo(contentDir, cfg.gitRepoUrl);
-  if (repo.cloned) console.log('[Hexo Pro]: cloned content repo');
-  else if (repo.initialized) console.log('[Hexo Pro]: initialized new content repo');
-  await git.configureIdentity(contentDir, cfg.gitName, cfg.gitEmail);
-  git.ensureIgnore(contentDir);
+  // 1. DB
+  const db = await databaseManager.initialize({ config: cfg.config, log: console });
 
-  // 2. Ensure a minimal hexo source layout exists.
-  ensureSourceLayout(contentDir);
+  // 2. GitHub 客户端（无凭据时仅内存模式，写操作会报错）
+  const github = cfg.githubToken && cfg.githubRepo
+    ? new GitHubClient({ token: cfg.githubToken, repo: cfg.githubRepo, branch: cfg.githubBranch })
+    : null;
 
-  // 3. Build the hexo shim (config + dirs + content indexer).
-  const hexo = new HexoShim(cfg);
+  const siteConfig = new SiteConfigStore(db.siteConfigDb, github);
 
-  // 4. Initialize the Postgres-backed database (users/settings/deploy/recycle…).
-  const db = await databaseManager.initialize(hexo);
+  // 3. 站点配置：空则从 GitHub 导入 _config.yml
+  await ensureSiteConfig(siteConfig, github);
 
-  // 5. Build the in-memory content index from the markdown files.
-  try {
-    hexo.rebuild();
-    console.log(`[Hexo Pro]: indexed ${hexo.model('Post').count()} posts, ${hexo.model('Page').count()} pages`);
-  } catch (err) {
-    console.error('[Hexo Pro]: content index failed:', err.message);
+  // 4. 合并配置
+  const siteRaw = await siteConfig.get('site');
+  if (siteRaw) {
+    const parsed = yaml.load(siteRaw) || {};
+    cfg.config = Object.assign({}, cfg.config, parsed);
   }
 
-  // 6. HTTP server.
+  await databaseManager.ensureInitialUser(cfg.config);
+
+  // 5. 内容存储：空则从 GitHub 导入 source/**
+  const hexo = new HexoShim(cfg, { github, siteConfig });
+  const store = new ContentStore(hexo, db.articleDb);
+  hexo.store = store;
+
+  if (!fs.existsSync(cfg.dataDir)) fs.mkdirSync(cfg.dataDir, { recursive: true });
+  const n = await store.load();
+  if (n.length === 0 && github) await importFromGithub(github, store);
+
+  console.log(`[Hexo Pro]: indexed ${store.models.Post.count()} posts, ${store.models.Page.count()} pages`);
+
+  // 6. HTTP server（去掉原 git commit hook / 静态图片服务）
   const app = express();
   app.disable('x-powered-by');
-
-  // Git commit hook: register a `finish` listener on every mutating API request
-  // BEFORE the API routes, so it fires once the handler ends the response. It
-  // commits the content repo (and pushes when AUTO_PUSH=true), debounced so a
-  // burst of related calls collapses into one commit.
-  let commitTimer = null;
-  app.use('/hexopro/api', (req, res, next) => {
-    res.on('finish', () => {
-      if (!['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) return;
-      if (commitTimer) return;
-      commitTimer = setTimeout(async () => {
-        commitTimer = null;
-        try {
-          const r = await git.commitAndMaybePush(contentDir, 'Hexo Pro: content update', {
-            autoPush: cfg.autoPush,
-            name: cfg.gitName,
-            email: cfg.gitEmail
-          });
-          if (r.committed) {
-            console.log(`[Hexo Pro]: committed ${r.hash}${r.pushed ? ' (pushed)' : ''}`);
-          }
-        } catch (err) {
-          console.error('[Hexo Pro]: git commit failed:', err.message);
-        }
-      }, 800);
-    });
-    next();
-  });
-
-  // API (registers body-parser, CORS, JWT and all /hexopro/api routes).
   await require('./api/api')(app, hexo);
 
-  // Static content assets (uploaded images live under source/<customPath>).
-  const imagesDir = path.join(cfg.source_dir, 'images');
-  if (fs.existsSync(imagesDir)) {
-    app.use('/images', express.static(imagesDir, { maxAge: '7d' }));
-  }
-  // Guarded fallback for other static assets from the source tree.
-  app.use(staticGuard);
-  app.use('/', express.static(cfg.source_dir, { dotfiles: 'deny', index: false }));
+  const uploadDir = cfg.upload_dir;
+  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+  app.use('/images', express.static(uploadDir, { maxAge: '7d' }));
 
-  // SPA (built React client, publicPath /pro/).
   const wwwDir = path.join(__dirname, 'www');
   if (fs.existsSync(wwwDir)) {
     app.use('/pro', express.static(wwwDir));
@@ -107,62 +81,52 @@ async function main() {
       res.sendFile(path.join(wwwDir, 'index.html'));
     });
     app.get('/', (req, res) => res.redirect('/pro/'));
-  } else {
-    console.warn('[Hexo Pro]: www/ not found — build the client first (`npm run build`).');
   }
 
-  // Final error handler (API errors already handled inside api.js).
   app.use((err, req, res, next) => {
     console.error('[Hexo Pro]: unhandled error:', err && err.stack ? err.stack : err);
     res.status(500).json({ code: 500, msg: 'internal error' });
   });
 
-  const port = cfg.port;
-  app.listen(port, () => {
-    console.log(`[Hexo Pro]: admin server listening on http://localhost:${port}/pro`);
-    console.log(`[Hexo Pro]: API base http://localhost:${port}/hexopro/api`);
+  app.listen(cfg.port, () => {
+    console.log(`[Hexo Pro]: admin server listening on http://localhost:${cfg.port}/pro`);
   });
-
   return app;
 }
 
-// Create the minimum hexo content layout if the repo is empty.
-function ensureSourceLayout(contentDir) {
-  const dirs = [
-    path.join(contentDir, 'source', '_posts'),
-    path.join(contentDir, 'source', '_drafts'),
-    path.join(contentDir, 'source', 'images'),
-    path.join(contentDir, 'scaffolds')
-  ];
-  dirs.forEach(dir => {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  });
-
-  const scaffold = path.join(contentDir, 'scaffolds', 'post.md');
-  if (!fs.existsSync(scaffold)) {
-    fs.writeFileSync(scaffold, '---\ntitle: {{ title }}\ndate: {{ date }}\ntags:\n---\n', 'utf8');
+async function ensureSiteConfig(siteConfig, github) {
+  const existing = await siteConfig.get('site');
+  if (existing != null) return;
+  if (!github) {
+    await siteConfig.set('site', 'title: Hexo Pro Site\nurl: http://localhost:8001\nroot: /\npermalink: :year/:month/:day/:title/\ntheme: landscape\n', { sync: false });
+    return;
   }
-  const configFile = path.join(contentDir, '_config.yml');
-  if (!fs.existsSync(configFile)) {
-    fs.writeFileSync(configFile, [
-      'title: Hexo Pro Site',
-      'url: http://localhost:8001',
-      'root: /',
-      'permalink: :year/:month/:day/:title/',
-      'theme: landscape',
-      ''
-    ].join('\n'), 'utf8');
+  try {
+    const f = await github.getFile('_config.yml');
+    await siteConfig.set('site', f.content, { sync: false });
+  } catch (e) {
+    console.warn('[Hexo Pro]: 导入 _config.yml 失败:', e.message);
   }
 }
 
-// Block raw source files (markdown, yaml, drafts, discarded) from being served
-// as static assets, while allowing uploaded media (images etc.).
-function staticGuard(req, res, next) {
-  const p = req.path || '';
-  const first = p.split('/')[1] || '';
-  if (first.startsWith('_')) return next();
-  if (/\.(md|markdown|yml|yaml|json|db)$/i.test(p)) return next();
-  next();
+async function importFromGithub(github, store) {
+  const paths = await github.listTree();
+  const mdFiles = paths.filter((p) => /^source\/.*\.(md|markdown)$/i.test(p));
+  for (const p of mdFiles) {
+    try {
+      const { content } = await github.getFile(p);
+      const source = p.replace(/^source\//, '');
+      const doc = source.startsWith('_drafts/')
+        ? parsePost(content, source, false, store.hexo.config)
+        : source.startsWith('_posts/')
+          ? parsePost(content, source, true, store.hexo.config)
+          : parsePage(content, source, store.hexo.config);
+      await store.upsert(doc);
+    } catch (e) {
+      console.warn(`[Hexo Pro]: 导入 ${p} 失败:`, e.message);
+    }
+  }
+  console.log(`[Hexo Pro]: 从 GitHub 导入 ${mdFiles.length} 个 markdown 文件`);
 }
 
 main().catch(err => {
