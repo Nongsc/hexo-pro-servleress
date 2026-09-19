@@ -110,26 +110,10 @@ module.exports = function (app, hexo, use) {
     }
   });
 
-  // 删除 YAML 文件：仅受管对象走 siteConfig（清空内容）
-  use('yaml/delete', async function (req, res) {
-    const { path: filePath } = req.body;
-
-    if (!filePath) {
-      return res.send(400, '文件路径不能为空');
-    }
-
-    const type = resolveManagedType(filePath);
-    if (!type) {
-      return res.send(400, '暂不支持：该路径不受管，仅支持 _config.yml / _config.<theme>.yml / templates.json');
-    }
-
-    try {
-      await hexo.siteConfig.set(type, '', { message: `Hexo Pro: delete ${type}` });
-      res.done({ success: true });
-    } catch (error) {
-      hexo.log.error(`删除 YAML 文件 ${filePath} 时出错:`, error);
-      res.send(500, '删除文件时出错');
-    }
+  // 删除 YAML 文件：无本地仓库；siteConfig 亦无 remove，删除会把 _config*.yml 推成空文件（数据丢失），
+  // 故三类受管对象一律返回「暂不支持」（R30）。
+  use('yaml/delete', function (req, res) {
+    res.send(400, '暂不支持删除配置文件（无本地内容仓库）');
   });
 
   // 获取模板列表

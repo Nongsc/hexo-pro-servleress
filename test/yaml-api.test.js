@@ -6,6 +6,24 @@ const yamlApi = require('../api/yaml_api');
 
 const { resolveManagedType, readTemplates, writeTemplates } = yamlApi._test;
 
+// 路由注册工厂的最小 harness：收集 use(path, fn) 注册的处理器
+function collectRoutes() {
+  const routes = {};
+  return {
+    routes,
+    use: (path, fn) => { routes[path] = fn; },
+  };
+}
+
+function fakeRes() {
+  const res = {
+    calls: [],
+    send: function (num, data) { res.calls.push(['send', num, data]); return res; },
+    done: function (val) { res.calls.push(['done', val]); return res; },
+  };
+  return res;
+}
+
 test('resolveManagedType 映射三类受管对象', () => {
   assert.equal(resolveManagedType('_config.yml'), 'site');
   assert.equal(resolveManagedType('_config.yaml'), 'site');
@@ -41,4 +59,62 @@ test('readTemplates 空或坏 JSON 返回 []', async () => {
   assert.deepEqual(await readTemplates({ siteConfig: { get: async () => null } }), []);
   assert.deepEqual(await readTemplates({ siteConfig: { get: async () => '{bad json' } }), []);
   assert.deepEqual(await readTemplates({ siteConfig: { get: async () => '{"not":"array"}' } }), []);
+});
+
+test('yaml/delete 返回「暂不支持」且不写 siteConfig（R30）', async () => {
+  const sets = [];
+  const hexo = {
+    siteConfig: {
+      get: async () => null,
+      set: async (type, content) => { sets.push({ type, content }); },
+    },
+    log: { error: () => {} },
+  };
+  const { routes, use } = collectRoutes();
+  yamlApi({}, hexo, use);
+
+  const res = fakeRes();
+  await routes['yaml/delete']({ body: { path: '_config.yml' } }, res);
+
+  assert.equal(sets.length, 0, '不应调用 siteConfig.set');
+  assert.equal(res.calls[0][0], 'send');
+  assert.equal(res.calls[0][1], 400);
+});
+
+test('yaml/update 受管路径委托 siteConfig.set', async () => {
+  const sets = [];
+  const hexo = {
+    siteConfig: {
+      get: async () => null,
+      set: async (type, content, opts) => { sets.push({ type, content, opts }); },
+    },
+    log: { error: () => {} },
+  };
+  const { routes, use } = collectRoutes();
+  yamlApi({}, hexo, use);
+
+  const res = fakeRes();
+  await routes['yaml/update']({ body: { path: '_config.yml', content: 'title: X' } }, res);
+
+  assert.equal(sets.length, 1);
+  assert.equal(sets[0].type, 'site');
+  assert.equal(sets[0].content, 'title: X');
+  assert.equal(res.calls[0][0], 'done');
+});
+
+test('yaml/update 非受管路径返回「暂不支持」', async () => {
+  const sets = [];
+  const hexo = {
+    siteConfig: { get: async () => null, set: async () => { sets.push(1); } },
+    log: { error: () => {} },
+  };
+  const { routes, use } = collectRoutes();
+  yamlApi({}, hexo, use);
+
+  const res = fakeRes();
+  await routes['yaml/update']({ body: { path: '_posts/hello.yml', content: 'x' } }, res);
+
+  assert.equal(sets.length, 0, '不应调用 siteConfig.set');
+  assert.equal(res.calls[0][0], 'send');
+  assert.equal(res.calls[0][1], 400);
 });

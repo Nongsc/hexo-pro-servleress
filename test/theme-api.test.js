@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const themeApi = require('../api/theme_api');
+const databaseManager = require('../lib/db');
 
 const {
   schemaCacheId,
@@ -15,14 +16,13 @@ const {
   createThemeConfigSnapshot,
 } = themeApi._test;
 
-// NeDB 风格回调 API 的最小 mock（theme_schema_cache 表）
-function fakeSchemaCache() {
-  const map = new Map();
-  return {
-    _map: map,
-    findOne: (q, cb) => cb(null, map.get(q._id) || null),
-    update: (q, u, o, cb) => { map.set(q._id, Object.assign({}, u.$set)); cb(null, 1); },
-  };
+// 无 DATABASE_URL 时 databaseManager 走内存模式，theme_schema_cache 是真实 Table 实例，
+// 其 applyUpdate 的「$set 合并 / 全量替换」语义与生产一致（不复刻、不掩盖行为）。
+delete process.env.DATABASE_URL;
+
+async function realSchemaDb() {
+  const dbs = await databaseManager.initialize({ config: {}, log: console });
+  return { themeSchemaCache: dbs.themeSchemaCache };
 }
 
 // SiteConfigStore 的最小 mock（get/set 同步内存）
@@ -40,23 +40,15 @@ test('schemaCacheId 生成 _id', () => {
 });
 
 test('writeSchemaFileWithMeta 写入 _id 与 _meta，readSchemaFileWithMeta 不含 _id 泄漏', async () => {
-  const cache = fakeSchemaCache();
-  const db = { themeSchemaCache: cache };
+  const db = await realSchemaDb();
   const schema = { title: { type: 'input', label: '标题' } };
 
   await writeSchemaFileWithMeta(db, 'anzhiyu', schema, 'hash123', 'zh');
 
-  // DB 中的 doc 含 _id 与 _meta（用于缓存校验）
-  const stored = cache._map.get('schema:anzhiyu');
-  assert.equal(stored._id, 'schema:anzhiyu');
-  assert.equal(stored._meta.configHash, 'hash123');
-  assert.equal(stored._meta.language, 'zh');
-  assert.deepEqual(stored.title, { type: 'input', label: '标题' });
-
-  // read 返回对象不含 _id，避免泄漏进 extractSchemaFromFileContent
   const read = await readSchemaFileWithMeta(db, 'anzhiyu');
   assert.equal(read._id, undefined);
   assert.equal(read._meta.configHash, 'hash123');
+  assert.equal(read._meta.language, 'zh');
   assert.deepEqual(read.title, { type: 'input', label: '标题' });
 
   const schemaOnly = extractSchemaFromFileContent(read);
@@ -65,8 +57,24 @@ test('writeSchemaFileWithMeta 写入 _id 与 _meta，readSchemaFileWithMeta 不�
   assert.deepEqual(schemaOnly, { title: { type: 'input', label: '标题' } });
 });
 
+test('writeSchemaFileWithMeta 全量替换：再生成后不残留旧字段', async () => {
+  const db = await realSchemaDb();
+
+  // 先写含 { a, b } 的 schema，再写只含 { a } 的 schema（模拟配置删掉字段后重新生成）
+  await writeSchemaFileWithMeta(db, 'stale', { a: { type: 'input' }, b: { type: 'input' } }, 'h1', 'zh');
+  await writeSchemaFileWithMeta(db, 'stale', { a: { type: 'input' } }, 'h2', 'zh');
+
+  const read = await readSchemaFileWithMeta(db, 'stale');
+  assert.equal(read._id, undefined);
+  assert.equal(read._meta.configHash, 'h2');
+
+  const schema = extractSchemaFromFileContent(read);
+  assert.deepEqual(schema, { a: { type: 'input' } });
+  assert.equal(schema.b, undefined, '旧字段 b 应被全量替换移除');
+});
+
 test('readSchemaFileWithMeta 无缓存返回 null', async () => {
-  const db = { themeSchemaCache: fakeSchemaCache() };
+  const db = await realSchemaDb();
   const read = await readSchemaFileWithMeta(db, 'missing');
   assert.equal(read, null);
 });
@@ -88,7 +96,6 @@ test('createThemeConfigSnapshot 写入 snapshot:theme:{id} 且 JSON 往返', asy
   assert.equal(meta.note, 'v1');
   assert.equal(meta.content, undefined, 'toSnapshotMeta 不应包含 content');
 
-  // 存到 site_config 的 type 为 snapshot:theme:{id}
   assert.ok(siteConfig._map.has('snapshot:theme:anzhiyu'));
 
   const snapshots = await readThemeConfigSnapshots(hexo, 'anzhiyu');

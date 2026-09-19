@@ -62,8 +62,10 @@ function writeSchemaFileWithMeta(db, themeId, schema, configHash, language) {
     _meta: { configHash, language, generatedAt: new Date().toISOString() },
     ...schema,
   }
+  // 全量替换（不带 $set），复刻原 fs 整文件覆盖语义：
+  // 主题配置删字段后重新 generate/save，旧字段必须被移除而不是残留。
   return new Promise((resolve, reject) => {
-    db.themeSchemaCache.update({ _id: fullObj._id }, { $set: fullObj }, { upsert: true }, (err) => {
+    db.themeSchemaCache.update({ _id: fullObj._id }, fullObj, { upsert: true }, (err) => {
       err ? reject(err) : resolve()
     })
   })
