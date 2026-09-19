@@ -99,7 +99,7 @@ module.exports = function (model, unimark, update, callback, hexo) {
     let sourceChanged = false
     if (update.source && update.source !== post.source) {
         const normalizedSource = String(update.source).replace(/^[/\\]+/, '')
-        const conflict = hexo.store.models.Post.find(d => d.source === normalizedSource && d._id !== post._id).length > 0
+        const conflict = hexo.model(model).find(d => d.source === normalizedSource && d._id !== post._id).length > 0
 
         if (!conflict) {
             post.source = normalizedSource
