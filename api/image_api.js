@@ -251,21 +251,8 @@ module.exports = function (app, hexo, use, db) {
         });
     });
 
-    // 配置multer存储
-    const storage = multer.diskStorage({
-        destination: function (req, file, cb) {
-            // 获取配置中的路径
-            const config = getStorageConfig();
-            const imagesDir = path.join(hexo.upload_dir, config.customPath);
-            fs.ensureDirSync(imagesDir);
-            cb(null, imagesDir);
-        },
-        filename: function (req, file, cb) {
-            // 生成唯一文件名
-            const uniqueName = `${uuidv4()}${path.extname(file.originalname)}`;
-            cb(null, uniqueName);
-        }
-    });
+    // 配置multer存储：serverless 下磁盘只读，统一改用内存存储（buffer 直传/直写，不落临时盘）
+    const storage = multer.memoryStorage();
 
     // 创建multer上传实例
     const upload = multer({ storage: storage });
@@ -963,7 +950,7 @@ module.exports = function (app, hexo, use, db) {
 
                     const results = [];
                     for (const f of files) {
-                        let filename = req.body.filename || ensureUtf8Filename(f.originalname) || path.basename(f.filename);
+                        let filename = req.body.filename || ensureUtf8Filename(f.originalname);
                         if (!filename) filename = `${uuidv4()}${path.extname(f.originalname || '')}`;
 
                         let dstPath = path.join(targetDir, filename);
@@ -974,7 +961,7 @@ module.exports = function (app, hexo, use, db) {
                             dstPath = path.join(targetDir, filename);
                         }
 
-                        fs.moveSync(f.path, dstPath, { overwrite: false });
+                        fs.writeFileSync(dstPath, f.buffer);
 
                         const relativePath = folder ? `${config.customPath}/${folder}/${filename}` : `${config.customPath}/${filename}`;
                         results.push({
@@ -1459,14 +1446,11 @@ module.exports = function (app, hexo, use, db) {
                         return res.send(500, '文件上传失败');
                     }
 
-                    imageData = fs.readFileSync(req.file.path);
+                    imageData = req.file.buffer;
                     filename = req.body.filename || ensureUtf8Filename(req.file.originalname);
                     folder = req.body.folder || '';
 
                     await uploadToAliyun(client, imageData, filename, folder, domain, res);
-
-                    // 清理临时文件
-                    fs.unlinkSync(req.file.path);
                 });
             } else {
                 // Base64上传
@@ -1546,14 +1530,11 @@ module.exports = function (app, hexo, use, db) {
                         return res.send(500, '文件上传失败');
                     }
 
-                    imageData = fs.readFileSync(req.file.path);
+                    imageData = req.file.buffer;
                     filename = req.body.filename || ensureUtf8Filename(req.file.originalname);
                     folder = req.body.folder || '';
 
                     await uploadToQiniu(formUploader, uploadToken, imageData, filename, folder, domain, res);
-
-                    // 清理临时文件
-                    fs.unlinkSync(req.file.path);
                 });
             } else {
                 // Base64上传
@@ -1628,14 +1609,11 @@ module.exports = function (app, hexo, use, db) {
                         return res.send(500, '文件上传失败');
                     }
 
-                    imageData = fs.readFileSync(req.file.path);
+                    imageData = req.file.buffer;
                     filename = req.body.filename || ensureUtf8Filename(req.file.originalname);
                     folder = req.body.folder || '';
 
                     await uploadToTencent(cos, region, bucket, imageData, filename, folder, domain, res);
-
-                    // 清理临时文件
-                    fs.unlinkSync(req.file.path);
                 });
             } else {
                 // Base64上传
