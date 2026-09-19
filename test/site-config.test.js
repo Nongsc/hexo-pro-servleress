@@ -34,6 +34,15 @@ test('githubPath 映射', () => {
   assert.equal(store.githubPath('site'), '_config.yml');
   assert.equal(store.githubPath('theme:landscape'), '_config.landscape.yml');
   assert.equal(store.githubPath('templates'), '_yaml_templates/templates.json');
+  assert.equal(store.githubPath('deploy'), null, 'deploy 配置只存 DB、不同步 GitHub');
+});
+
+test('set("deploy") 只写 DB、不触发 GitHub writeFile（避免凭据泄漏）', async () => {
+  const github = fakeGithub();
+  const store = new SiteConfigStore(fakeDb(), github);
+  await store.set('deploy', JSON.stringify({ token: 'ghp_secret', workflowId: 'deploy.yml' }));
+  assert.equal(github.calls.length, 0, 'githubPath("deploy") 为 null 时不应调用 writeFile');
+  assert.ok(await store.get('deploy'), '仍应持久化到 DB');
 });
 
 test('set 默认 sync 时按 githubPath 写入并使用默认 message', async () => {
