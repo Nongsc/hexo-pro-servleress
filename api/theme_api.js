@@ -25,12 +25,12 @@ const {
   calculateHash,
 } = require('./schema_generator')
 
-function getSchemaFilePath(baseDir, themeId) {
-  return path.join(baseDir, `_config.${themeId}.schema.json`)
+function schemaCacheId(themeId) {
+  return 'schema:' + themeId
 }
 
 /**
- * 从 schema 文件中提取纯 schema（去掉 _meta）
+ * 从 schema 缓存 doc 中提取纯 schema（去掉 _meta）
  */
 function extractSchemaFromFileContent(fullObj) {
   if (!fullObj || typeof fullObj !== 'object') return null
@@ -39,29 +39,34 @@ function extractSchemaFromFileContent(fullObj) {
 }
 
 /**
- * 读取 schema 文件，若 _meta.configHash 匹配则返回 schema
+ * 读取 schema 缓存（theme_schema_cache 表，_id = 'schema:' + themeId）。
+ * 返回 { _meta, ...schema }，不含 _id，避免 _id 泄漏进 extractSchemaFromFileContent。
  */
-function readSchemaFileWithMeta(baseDir, themeId) {
-  const schemaPath = getSchemaFilePath(baseDir, themeId)
-  if (!fs.existsSync(schemaPath)) return null
-  try {
-    const content = fse.readFileSync(schemaPath, 'utf-8')
-    return JSON.parse(content)
-  } catch {
-    return null
-  }
+function readSchemaFileWithMeta(db, themeId) {
+  return new Promise((resolve, reject) => {
+    db.themeSchemaCache.findOne({ _id: schemaCacheId(themeId) }, (err, doc) => {
+      if (err) return reject(err)
+      if (!doc) return resolve(null)
+      const { _id, ...rest } = doc
+      resolve(rest)
+    })
+  })
 }
 
 /**
- * 写入 schema 文件（含 _meta）
+ * 写入 schema 缓存（含 _id 与 _meta）。
  */
-function writeSchemaFileWithMeta(baseDir, themeId, schema, configHash, language) {
-  const schemaPath = getSchemaFilePath(baseDir, themeId)
+function writeSchemaFileWithMeta(db, themeId, schema, configHash, language) {
   const fullObj = {
+    _id: schemaCacheId(themeId),
     _meta: { configHash, language, generatedAt: new Date().toISOString() },
     ...schema,
   }
-  fse.writeFileSync(schemaPath, JSON.stringify(fullObj, null, 2), 'utf-8')
+  return new Promise((resolve, reject) => {
+    db.themeSchemaCache.update({ _id: fullObj._id }, { $set: fullObj }, { upsert: true }, (err) => {
+      err ? reject(err) : resolve()
+    })
+  })
 }
 
 // 内置主题列表
@@ -152,16 +157,17 @@ function execPromise(command, options = {}) {
   });
 }
 
-const SNAPSHOT_STORE_DIR = '.hexo-pro/theme-config-snapshots'
 const MAX_THEME_CONFIG_SNAPSHOTS = 30
 const GLOBAL_CONFIG_SNAPSHOT_ID = '__global__site_config__'
 
-function getThemeSnapshotDir(baseDir) {
-  return path.join(baseDir, SNAPSHOT_STORE_DIR)
-}
-
-function getThemeSnapshotFilePath(baseDir, themeId) {
-  return path.join(getThemeSnapshotDir(baseDir), `${themeId}.json`)
+/**
+ * 快照存储在 site_config 表：
+ *   - 全局快照 → type 'snapshot:site'
+ *   - 主题快照 → type 'snapshot:theme:{id}'
+ * 这些 type 的 githubPath 均为 null，因此只写 DB、不同步 GitHub。
+ */
+function snapshotTypeFor(themeId) {
+  return themeId === GLOBAL_CONFIG_SNAPSHOT_ID ? 'snapshot:site' : `snapshot:theme:${themeId}`
 }
 
 function toSnapshotMeta(snapshot) {
@@ -170,11 +176,11 @@ function toSnapshotMeta(snapshot) {
   return meta
 }
 
-function readThemeConfigSnapshots(baseDir, themeId) {
-  const snapshotPath = getThemeSnapshotFilePath(baseDir, themeId)
-  if (!fs.existsSync(snapshotPath)) return []
+async function readThemeConfigSnapshots(hexo, themeId) {
+  const raw = await hexo.siteConfig.get(snapshotTypeFor(themeId))
+  if (!raw) return []
   try {
-    const parsed = JSON.parse(fse.readFileSync(snapshotPath, 'utf-8'))
+    const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
     return parsed.filter((item) => item && typeof item.content === 'string')
   } catch {
@@ -182,17 +188,17 @@ function readThemeConfigSnapshots(baseDir, themeId) {
   }
 }
 
-function writeThemeConfigSnapshots(baseDir, themeId, snapshots) {
-  const dir = getThemeSnapshotDir(baseDir)
-  fse.ensureDirSync(dir)
-  const snapshotPath = getThemeSnapshotFilePath(baseDir, themeId)
-  fse.writeFileSync(snapshotPath, JSON.stringify(snapshots, null, 2), 'utf-8')
+async function writeThemeConfigSnapshots(hexo, themeId, snapshots) {
+  const type = snapshotTypeFor(themeId)
+  await hexo.siteConfig.set(type, JSON.stringify(snapshots, null, 2), {
+    message: `Hexo Pro: update ${type}`,
+  })
 }
 
-function createThemeConfigSnapshot(baseDir, themeId, content, options = {}) {
+async function createThemeConfigSnapshot(hexo, themeId, content, options = {}) {
   if (typeof content !== 'string') return null
   const { source = 'manual', note = '' } = options
-  const snapshots = readThemeConfigSnapshots(baseDir, themeId)
+  const snapshots = await readThemeConfigSnapshots(hexo, themeId)
   const hash = calculateHash(content)
 
   if (snapshots[0] && snapshots[0].hash === hash) {
@@ -212,59 +218,29 @@ function createThemeConfigSnapshot(baseDir, themeId, content, options = {}) {
   }
 
   const next = [snapshot, ...snapshots].slice(0, MAX_THEME_CONFIG_SNAPSHOTS)
-  writeThemeConfigSnapshots(baseDir, themeId, next)
+  await writeThemeConfigSnapshots(hexo, themeId, next)
   return toSnapshotMeta(snapshot)
 }
 
-function readThemeConfigContent(baseDir, theme) {
-  const configPath = path.join(baseDir, theme.configFile)
-  const themeConfigPath = path.join(baseDir, 'themes', theme.themeDir, '_config.yml')
-
-  if (fs.existsSync(configPath)) {
-    return fse.readFileSync(configPath, 'utf-8')
-  }
-  if (fs.existsSync(themeConfigPath)) {
-    return fse.readFileSync(themeConfigPath, 'utf-8')
-  }
-  return null
+async function readThemeConfigContent(hexo, theme) {
+  return hexo.siteConfig.get('theme:' + theme.id)
 }
 
-function getGlobalConfigPath(baseDir) {
-  return path.join(baseDir, '_config.yml')
+async function readGlobalConfigContent(hexo) {
+  return hexo.siteConfig.get('site')
 }
 
-function readGlobalConfigContent(baseDir) {
-  const configPath = getGlobalConfigPath(baseDir)
-  if (!fs.existsSync(configPath)) return null
-  return fse.readFileSync(configPath, 'utf-8')
+async function applyGlobalConfigContent(hexo, content) {
+  await hexo.siteConfig.set('site', content, { message: 'Hexo Pro: update _config.yml' })
+  const parsed = yaml.load(content) || {}
+  hexo.config = Object.assign({}, hexo.config, parsed)
+  return { success: true, needRestart: true, message: '全局配置已保存' }
 }
 
-function applyGlobalConfigContent(baseDir, content) {
-  const configPath = getGlobalConfigPath(baseDir)
-  fse.writeFileSync(configPath, content, 'utf-8')
-  return {
-    success: true,
-    needRestart: true,
-    message: '全局配置已保存，请重启 Hexo 服务后生效',
-    tip: '插件端请手动重启，桌面端可自动重启',
-  }
-}
-
-function ensureThemeConfigFile(baseDir, theme) {
-  const configPath = path.join(baseDir, theme.configFile)
-  if (fs.existsSync(configPath)) return configPath
-
-  const themePath = path.join(baseDir, 'themes', theme.themeDir)
-  const themeConfigSrc = path.join(themePath, '_config.yml')
-  if (fs.existsSync(themeConfigSrc)) {
-    fse.copyFileSync(themeConfigSrc, configPath)
-  }
-  return configPath
-}
-
-function isThemeInstalled(baseDir, theme) {
-  const themePath = path.join(baseDir, 'themes', theme.themeDir)
-  return fs.existsSync(themePath)
+async function isThemeInstalled(hexo, theme) {
+  if (getThemeById(theme.id)) return true
+  const content = await hexo.siteConfig.get('theme:' + theme.id)
+  return content !== null && content !== undefined
 }
 
 function getThemeById(themeId) {
@@ -294,13 +270,14 @@ function validateYamlContent(content) {
   }
 }
 
-async function applyThemeConfigContent(hexo, baseDir, theme, content) {
-  if (!isThemeInstalled(baseDir, theme)) {
+async function applyThemeConfigContent(hexo, theme, content) {
+  if (!(await isThemeInstalled(hexo, theme))) {
     throw new Error('主题未安装')
   }
 
-  const configPath = ensureThemeConfigFile(baseDir, theme)
-  fse.writeFileSync(configPath, content, 'utf-8')
+  await hexo.siteConfig.set('theme:' + theme.id, content, {
+    message: `Hexo Pro: update theme:${theme.id}`,
+  })
   const isCurrentTheme = (hexo.config.theme === theme.themeDir)
 
   if (!isCurrentTheme) {
@@ -321,7 +298,7 @@ async function applyThemeConfigContent(hexo, baseDir, theme, content) {
       hexo.log.info('主题配置已在内存中热更新')
     }
   } catch (err) {
-    hexo.log.warn('解析主题配置失败，已保存文件:', err.message)
+    hexo.log.warn('解析主题配置失败，已保存:', err.message)
   }
 
   if (hexo.locals && hexo.locals.invalidate) {
@@ -329,25 +306,9 @@ async function applyThemeConfigContent(hexo, baseDir, theme, content) {
     hexo.log.info('Hexo locals 缓存已清除')
   }
 
-  hexo.emit('generateBefore')
-
-  setImmediate(async () => {
-    hexo.log.info('[Hexo Pro] 主题配置已更新，正在重新生成站点...')
-    try {
-      const publicDir = path.join(hexo.base_dir, 'public')
-      await cleanPublicDir(publicDir)
-      hexo.log.info('[Hexo Pro] public 目录已清理')
-
-      await hexo._generate({ cache: false })
-      hexo.log.info('[Hexo Pro] 站点重新生成成功')
-    } catch (err) {
-      hexo.log.error('[Hexo Pro] 站点重新生成失败:', err.message)
-    }
-  })
-
   return {
     success: true,
-    message: '配置已保存，正在重新生成站点...',
+    message: '配置已保存',
     tip: '如果页面未更新，请尝试强制刷新浏览器 (Ctrl+F5 或 Cmd+Shift+R)',
   }
 }
@@ -447,7 +408,7 @@ module.exports = function (app, hexo, use, db) {
   });
 
   // 获取主题配置内容
-  use('theme/config', function (req, res) {
+  use('theme/config', async function (req, res) {
     const themeId = req.query.themeId || req.body?.themeId;
     if (!themeId) {
       return res.send(400, '缺少主题ID');
@@ -458,11 +419,9 @@ module.exports = function (app, hexo, use, db) {
       return res.send(404, '主题不存在');
     }
 
-    const baseDir = hexo.base_dir;
-
     try {
-      const content = readThemeConfigContent(baseDir, theme);
-      if (content === null) {
+      const content = await readThemeConfigContent(hexo, theme);
+      if (content === null || content === undefined) {
         return res.send(404, '主题配置文件不存在');
       }
       res.done({ content, configPath: theme.configFile });
@@ -473,7 +432,7 @@ module.exports = function (app, hexo, use, db) {
   });
 
   // 保存主题配置
-  use('theme/config/save', function (req, res) {
+  use('theme/config/save', async function (req, res) {
     if (req.method !== 'POST') return;
 
     const { themeId, content } = req.body || {};
@@ -484,13 +443,6 @@ module.exports = function (app, hexo, use, db) {
     const theme = getThemeById(themeId);
     if (!theme) {
       return res.send(404, '主题不存在');
-    }
-
-    const baseDir = hexo.base_dir;
-    const previousContent = readThemeConfigContent(baseDir, theme);
-
-    if (!isThemeInstalled(baseDir, theme)) {
-      return res.send(404, '主题未安装');
     }
 
     if (typeof content !== 'string') {
@@ -509,24 +461,27 @@ module.exports = function (app, hexo, use, db) {
       })
     }
 
-    (async () => {
-      try {
-        let snapshot = null
-        if (typeof previousContent === 'string' && previousContent !== content) {
-          snapshot = createThemeConfigSnapshot(baseDir, themeId, previousContent, { source: 'auto-save' })
-        }
-
-        const result = await applyThemeConfigContent(hexo, baseDir, theme, content)
-        res.done(Object.assign({}, result, { snapshot }))
-      } catch (error) {
-        hexo.log.error('保存主题配置失败:', error);
-        res.send(500, '保存主题配置失败');
+    try {
+      if (!(await isThemeInstalled(hexo, theme))) {
+        return res.send(404, '主题未安装');
       }
-    })()
+
+      const previousContent = await readThemeConfigContent(hexo, theme);
+      let snapshot = null
+      if (typeof previousContent === 'string' && previousContent !== content) {
+        snapshot = await createThemeConfigSnapshot(hexo, themeId, previousContent, { source: 'auto-save' })
+      }
+
+      const result = await applyThemeConfigContent(hexo, theme, content)
+      res.done(Object.assign({}, result, { snapshot }))
+    } catch (error) {
+      hexo.log.error('保存主题配置失败:', error);
+      res.send(500, '保存主题配置失败');
+    }
   });
 
   // 获取主题配置快照列表
-  use('theme/config/snapshots', function (req, res) {
+  use('theme/config/snapshots', async function (req, res) {
     const themeId = req.query.themeId || req.body?.themeId;
     if (!themeId) {
       return res.send(400, '缺少主题ID');
@@ -538,7 +493,7 @@ module.exports = function (app, hexo, use, db) {
     }
 
     try {
-      const snapshots = readThemeConfigSnapshots(hexo.base_dir, themeId)
+      const snapshots = (await readThemeConfigSnapshots(hexo, themeId))
         .map((item) => toSnapshotMeta(item))
         .filter(Boolean)
       res.done({ snapshots, total: snapshots.length, max: MAX_THEME_CONFIG_SNAPSHOTS })
@@ -549,7 +504,7 @@ module.exports = function (app, hexo, use, db) {
   })
 
   // 手动创建主题配置快照
-  use('theme/config/snapshot/create', function (req, res) {
+  use('theme/config/snapshot/create', async function (req, res) {
     if (req.method !== 'POST') return;
 
     const { themeId, note = '' } = req.body || {}
@@ -563,12 +518,12 @@ module.exports = function (app, hexo, use, db) {
     }
 
     try {
-      const content = readThemeConfigContent(hexo.base_dir, theme)
+      const content = await readThemeConfigContent(hexo, theme)
       if (typeof content !== 'string') {
         return res.send(404, '主题配置文件不存在')
       }
 
-      const snapshot = createThemeConfigSnapshot(hexo.base_dir, themeId, content, {
+      const snapshot = await createThemeConfigSnapshot(hexo, themeId, content, {
         source: 'manual',
         note,
       })
@@ -592,7 +547,7 @@ module.exports = function (app, hexo, use, db) {
   })
 
   // 回滚主题配置到指定快照
-  use('theme/config/rollback', function (req, res) {
+  use('theme/config/rollback', async function (req, res) {
     if (req.method !== 'POST') return;
 
     const { themeId, snapshotId } = req.body || {}
@@ -605,40 +560,38 @@ module.exports = function (app, hexo, use, db) {
       return res.send(404, '主题不存在')
     }
 
-    const snapshots = readThemeConfigSnapshots(hexo.base_dir, themeId)
-    const targetSnapshot = snapshots.find((item) => item.id === snapshotId)
-    if (!targetSnapshot) {
-      return res.send(404, '快照不存在')
-    }
-
-    ; (async () => {
-      try {
-        const currentContent = readThemeConfigContent(hexo.base_dir, theme)
-        let backupSnapshot = null
-        if (typeof currentContent === 'string' && currentContent !== targetSnapshot.content) {
-          backupSnapshot = createThemeConfigSnapshot(hexo.base_dir, themeId, currentContent, {
-            source: 'rollback-backup',
-            note: `before rollback to ${snapshotId}`,
-          })
-        }
-
-        const result = await applyThemeConfigContent(hexo, hexo.base_dir, theme, targetSnapshot.content)
-        res.done(Object.assign({}, result, {
-          rollbackTo: toSnapshotMeta(targetSnapshot),
-          backupSnapshot,
-        }))
-      } catch (error) {
-        hexo.log.error('回滚主题配置失败:', error)
-        res.send(500, '回滚主题配置失败')
+    try {
+      const snapshots = await readThemeConfigSnapshots(hexo, themeId)
+      const targetSnapshot = snapshots.find((item) => item.id === snapshotId)
+      if (!targetSnapshot) {
+        return res.send(404, '快照不存在')
       }
-    })()
+
+      const currentContent = await readThemeConfigContent(hexo, theme)
+      let backupSnapshot = null
+      if (typeof currentContent === 'string' && currentContent !== targetSnapshot.content) {
+        backupSnapshot = await createThemeConfigSnapshot(hexo, themeId, currentContent, {
+          source: 'rollback-backup',
+          note: `before rollback to ${snapshotId}`,
+        })
+      }
+
+      const result = await applyThemeConfigContent(hexo, theme, targetSnapshot.content)
+      res.done(Object.assign({}, result, {
+        rollbackTo: toSnapshotMeta(targetSnapshot),
+        backupSnapshot,
+      }))
+    } catch (error) {
+      hexo.log.error('回滚主题配置失败:', error)
+      res.send(500, '回滚主题配置失败')
+    }
   });
 
   // 获取全局配置内容（_config.yml）
-  use('site/config', function (req, res) {
+  use('site/config', async function (req, res) {
     try {
-      const content = readGlobalConfigContent(hexo.base_dir)
-      if (content === null) {
+      const content = await readGlobalConfigContent(hexo)
+      if (content === null || content === undefined) {
         return res.send(404, '全局配置文件不存在')
       }
       res.done({ content, configPath: '_config.yml', needRestart: true })
@@ -649,7 +602,7 @@ module.exports = function (app, hexo, use, db) {
   })
 
   // 保存全局配置
-  use('site/config/save', function (req, res) {
+  use('site/config/save', async function (req, res) {
     if (req.method !== 'POST') return
 
     const { content } = req.body || {}
@@ -672,30 +625,27 @@ module.exports = function (app, hexo, use, db) {
       })
     }
 
-    ; (async () => {
-      try {
-        const baseDir = hexo.base_dir
-        const previousContent = readGlobalConfigContent(baseDir)
-        let snapshot = null
-        if (typeof previousContent === 'string' && previousContent !== content) {
-          snapshot = createThemeConfigSnapshot(baseDir, GLOBAL_CONFIG_SNAPSHOT_ID, previousContent, {
-            source: 'auto-save',
-          })
-        }
-
-        const result = applyGlobalConfigContent(baseDir, content)
-        res.done(Object.assign({}, result, { snapshot }))
-      } catch (error) {
-        hexo.log.error('保存全局配置失败:', error)
-        res.send(500, '保存全局配置失败')
+    try {
+      const previousContent = await readGlobalConfigContent(hexo)
+      let snapshot = null
+      if (typeof previousContent === 'string' && previousContent !== content) {
+        snapshot = await createThemeConfigSnapshot(hexo, GLOBAL_CONFIG_SNAPSHOT_ID, previousContent, {
+          source: 'auto-save',
+        })
       }
-    })()
+
+      const result = await applyGlobalConfigContent(hexo, content)
+      res.done(Object.assign({}, result, { snapshot }))
+    } catch (error) {
+      hexo.log.error('保存全局配置失败:', error)
+      res.send(500, '保存全局配置失败')
+    }
   })
 
   // 获取全局配置快照列表
-  use('site/config/snapshots', function (req, res) {
+  use('site/config/snapshots', async function (req, res) {
     try {
-      const snapshots = readThemeConfigSnapshots(hexo.base_dir, GLOBAL_CONFIG_SNAPSHOT_ID)
+      const snapshots = (await readThemeConfigSnapshots(hexo, GLOBAL_CONFIG_SNAPSHOT_ID))
         .map((item) => toSnapshotMeta(item))
         .filter(Boolean)
       res.done({ snapshots, total: snapshots.length, max: MAX_THEME_CONFIG_SNAPSHOTS })
@@ -706,17 +656,17 @@ module.exports = function (app, hexo, use, db) {
   })
 
   // 手动创建全局配置快照
-  use('site/config/snapshot/create', function (req, res) {
+  use('site/config/snapshot/create', async function (req, res) {
     if (req.method !== 'POST') return
 
     const { note = '' } = req.body || {}
     try {
-      const content = readGlobalConfigContent(hexo.base_dir)
+      const content = await readGlobalConfigContent(hexo)
       if (typeof content !== 'string') {
         return res.send(404, '全局配置文件不存在')
       }
 
-      const snapshot = createThemeConfigSnapshot(hexo.base_dir, GLOBAL_CONFIG_SNAPSHOT_ID, content, {
+      const snapshot = await createThemeConfigSnapshot(hexo, GLOBAL_CONFIG_SNAPSHOT_ID, content, {
         source: 'manual',
         note,
       })
@@ -740,7 +690,7 @@ module.exports = function (app, hexo, use, db) {
   })
 
   // 回滚全局配置到指定快照
-  use('site/config/rollback', function (req, res) {
+  use('site/config/rollback', async function (req, res) {
     if (req.method !== 'POST') return
 
     const { snapshotId } = req.body || {}
@@ -748,33 +698,31 @@ module.exports = function (app, hexo, use, db) {
       return res.send(400, '缺少快照ID')
     }
 
-    const snapshots = readThemeConfigSnapshots(hexo.base_dir, GLOBAL_CONFIG_SNAPSHOT_ID)
-    const targetSnapshot = snapshots.find((item) => item.id === snapshotId)
-    if (!targetSnapshot) {
-      return res.send(404, '快照不存在')
-    }
-
-    ; (async () => {
-      try {
-        const currentContent = readGlobalConfigContent(hexo.base_dir)
-        let backupSnapshot = null
-        if (typeof currentContent === 'string' && currentContent !== targetSnapshot.content) {
-          backupSnapshot = createThemeConfigSnapshot(hexo.base_dir, GLOBAL_CONFIG_SNAPSHOT_ID, currentContent, {
-            source: 'rollback-backup',
-            note: `before rollback to ${snapshotId}`,
-          })
-        }
-
-        const result = applyGlobalConfigContent(hexo.base_dir, targetSnapshot.content)
-        res.done(Object.assign({}, result, {
-          rollbackTo: toSnapshotMeta(targetSnapshot),
-          backupSnapshot,
-        }))
-      } catch (error) {
-        hexo.log.error('回滚全局配置失败:', error)
-        res.send(500, '回滚全局配置失败')
+    try {
+      const snapshots = await readThemeConfigSnapshots(hexo, GLOBAL_CONFIG_SNAPSHOT_ID)
+      const targetSnapshot = snapshots.find((item) => item.id === snapshotId)
+      if (!targetSnapshot) {
+        return res.send(404, '快照不存在')
       }
-    })()
+
+      const currentContent = await readGlobalConfigContent(hexo)
+      let backupSnapshot = null
+      if (typeof currentContent === 'string' && currentContent !== targetSnapshot.content) {
+        backupSnapshot = await createThemeConfigSnapshot(hexo, GLOBAL_CONFIG_SNAPSHOT_ID, currentContent, {
+          source: 'rollback-backup',
+          note: `before rollback to ${snapshotId}`,
+        })
+      }
+
+      const result = await applyGlobalConfigContent(hexo, targetSnapshot.content)
+      res.done(Object.assign({}, result, {
+        rollbackTo: toSnapshotMeta(targetSnapshot),
+        backupSnapshot,
+      }))
+    } catch (error) {
+      hexo.log.error('回滚全局配置失败:', error)
+      res.send(500, '回滚全局配置失败')
+    }
   })
 
   // 检查主题是否已安装
@@ -800,7 +748,7 @@ module.exports = function (app, hexo, use, db) {
   });
 
   // 切换主题
-  use('theme/switch', function (req, res) {
+  use('theme/switch', async function (req, res) {
     if (req.method !== 'POST') return;
 
     const { themeId } = req.body || {};
@@ -822,12 +770,12 @@ module.exports = function (app, hexo, use, db) {
     }
 
     try {
-      // 更新 _config.yml 的 theme 字段
-      const configPath = path.join(baseDir, '_config.yml');
-      let configContent = fse.readFileSync(configPath, 'utf-8');
+      // 从 siteConfig 读取 _config.yml 并更新 theme 字段（写回 DB + GitHub）
+      const rawConfig = await hexo.siteConfig.get('site');
       let config;
       try {
-        config = yaml.load(configContent);
+        config = rawConfig ? yaml.load(rawConfig) : {};
+        if (!config || typeof config !== 'object') config = {};
       } catch (e) {
         hexo.log.error('解析 _config.yml 失败:', e);
         return res.send(500, '解析站点配置失败');
@@ -850,19 +798,22 @@ module.exports = function (app, hexo, use, db) {
       }
 
       config.theme = theme.themeDir;
-      fse.writeFileSync(configPath, yaml.dump(config), 'utf-8');
+      await hexo.siteConfig.set('site', yaml.dump(config), { message: 'Hexo Pro: switch theme' });
       hexo.log.info(`[Theme] 已切换主题为 ${theme.themeDir}`);
 
       // 更新内存中的配置，确保后续查询能获取正确的当前主题
       hexo.config.theme = theme.themeDir;
 
-      // 复制主题配置到根目录作为覆盖配置（如果不存在）
+      // 若 DB 中尚无该主题覆盖配置，则从主题源码 _config.yml 复制到 siteConfig
       const themeConfigSrc = path.join(themePath, '_config.yml');
-      const themeConfigDest = path.join(baseDir, theme.configFile);
       let configCopied = false;
-      if (fs.existsSync(themeConfigSrc) && !fs.existsSync(themeConfigDest)) {
-        fse.copyFileSync(themeConfigSrc, themeConfigDest);
-        hexo.log.info(`[Theme] 已创建覆盖配置文件 ${theme.configFile}`);
+      const existingThemeConfig = await hexo.siteConfig.get('theme:' + theme.id);
+      if (fs.existsSync(themeConfigSrc) && (existingThemeConfig === null || existingThemeConfig === undefined)) {
+        const srcContent = fse.readFileSync(themeConfigSrc, 'utf-8');
+        await hexo.siteConfig.set('theme:' + theme.id, srcContent, {
+          message: `Hexo Pro: copy theme config ${theme.id}`,
+        });
+        hexo.log.info(`[Theme] 已创建覆盖配置 ${theme.configFile}`);
         configCopied = true;
       }
 
@@ -879,8 +830,8 @@ module.exports = function (app, hexo, use, db) {
     }
   });
 
-  // 获取主题 Schema（从独立 JSON 文件）
-  use('theme/schema', function (req, res) {
+  // 获取主题 Schema（从 theme_schema_cache 表）
+  use('theme/schema', async function (req, res) {
     const themeId = req.query.themeId || req.body?.themeId
     if (!themeId) {
       return res.send(400, '缺少主题ID')
@@ -891,11 +842,8 @@ module.exports = function (app, hexo, use, db) {
       return res.send(404, '主题不存在')
     }
 
-    const baseDir = hexo.base_dir
-    const schemaPath = getSchemaFilePath(baseDir, themeId)
-
     try {
-      const fullObj = readSchemaFileWithMeta(baseDir, themeId)
+      const fullObj = await readSchemaFileWithMeta(db, themeId)
       if (!fullObj) {
         return res.done({ schema: null, hasSchema: false })
       }
@@ -907,8 +855,8 @@ module.exports = function (app, hexo, use, db) {
     }
   })
 
-  // 保存主题 Schema 到独立 JSON 文件（含 _meta 用于缓存校验）
-  use('theme/schema/save', function (req, res) {
+  // 保存主题 Schema 到 theme_schema_cache 表（含 _meta 用于缓存校验）
+  use('theme/schema/save', async function (req, res) {
     if (req.method !== 'POST') return
 
     const { themeId, schema, language = 'zh' } = req.body || {}
@@ -921,17 +869,11 @@ module.exports = function (app, hexo, use, db) {
       return res.send(404, '主题不存在')
     }
 
-    const baseDir = hexo.base_dir
-    const configPath = path.join(baseDir, theme.configFile)
-
     try {
       const schemaObj = typeof schema === 'string' ? JSON.parse(schema) : schema
-      let configHash = ''
-      if (fs.existsSync(configPath)) {
-        const configContent = fse.readFileSync(configPath, 'utf-8')
-        configHash = calculateHash(configContent)
-      }
-      writeSchemaFileWithMeta(baseDir, themeId, schemaObj, configHash, language)
+      const configContent = await hexo.siteConfig.get('theme:' + themeId)
+      const configHash = configContent ? calculateHash(configContent) : ''
+      await writeSchemaFileWithMeta(db, themeId, schemaObj, configHash, language)
       res.done({ success: true, message: 'Schema 已保存' })
     } catch (error) {
       hexo.log.error('保存 Schema 失败:', error)
@@ -965,21 +907,19 @@ module.exports = function (app, hexo, use, db) {
 
     (async () => {
       try {
-        const baseDir = hexo.base_dir
-        const configPath = path.join(baseDir, theme.configFile)
+        const configContent = await hexo.siteConfig.get('theme:' + theme.id);
 
-        // 检查配置文件是否存在
-        if (!fs.existsSync(configPath)) {
+        // 检查配置是否存在
+        if (configContent === null || configContent === undefined) {
           res.write(`data: ${JSON.stringify({ type: 'error', message: '主题配置文件不存在' })}\n\n`);
           return res.end();
         }
 
-        const configContent = fse.readFileSync(configPath, 'utf-8');
         const configHash = calculateHash(configContent);
 
-        // 尝试从 schema 文件读取缓存（强制重新生成时跳过）
+        // 尝试从 schema 缓存读取（强制重新生成时跳过）
         if (!forceRegenerate) {
-          const fileCache = readSchemaFileWithMeta(baseDir, themeId);
+          const fileCache = await readSchemaFileWithMeta(db, themeId);
           if (fileCache && fileCache._meta && fileCache._meta.configHash === configHash && fileCache._meta.language === language) {
             const schemaFromFile = extractSchemaFromFileContent(fileCache);
             if (schemaFromFile && Object.keys(schemaFromFile).length > 0) {
@@ -1087,8 +1027,8 @@ module.exports = function (app, hexo, use, db) {
         }
         const fieldCount = countSchemaFields(schemaObj);
 
-        // 保存到 schema 文件（含 _meta 用于下次缓存校验）
-        writeSchemaFileWithMeta(baseDir, themeId, schemaObj, configHash, language);
+        // 保存到 schema 缓存（含 _meta 用于下次缓存校验）
+        await writeSchemaFileWithMeta(db, themeId, schemaObj, configHash, language);
 
         // fullResult 为原始 YAML（不修改），schema 为独立 JSON
         res.write(
@@ -1113,4 +1053,20 @@ module.exports = function (app, hexo, use, db) {
       }
     })();
   });
+};
+
+// 供 yaml_api 复用受管主题清单
+module.exports.BUILTIN_THEMES = BUILTIN_THEMES;
+
+// 供聚焦单元测试使用（不暴露给路由层）
+module.exports._test = {
+  schemaCacheId,
+  extractSchemaFromFileContent,
+  readSchemaFileWithMeta,
+  writeSchemaFileWithMeta,
+  snapshotTypeFor,
+  toSnapshotMeta,
+  readThemeConfigSnapshots,
+  writeThemeConfigSnapshots,
+  createThemeConfigSnapshot,
 };
