@@ -9,7 +9,7 @@ import { getApp } from '../lib/app.js';
 
 let handler;
 async function getHandler() {
-  if (!handler) handler = serverless(await getApp());
+  if (!handler) handler = serverless(await getApp(), { binary: true });
   return handler;
 }
 
