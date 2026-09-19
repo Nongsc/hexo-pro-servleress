@@ -99,7 +99,7 @@ test('deploy/execute：triggerWorkflow 在 res.done 之前完成，且只触发�
     assert.deepEqual(state.triggerCalls, [{ wfId: 'deploy.yml', ref: 'main' }]);
 });
 
-test('deploy/execute：触发失败返回 500（带 error.message）且状态记为 failed', async () => {
+test('deploy/execute：触发失败返回 500（脱敏文案）且状态记为 failed', async () => {
     const state = { triggerCount: 0, triggeredBeforeDone: false };
     const deployStatusDb = makeDeployStatusDb();
     const hexo = {
@@ -119,13 +119,13 @@ test('deploy/execute：触发失败返回 500（带 error.message）且状态记
     await res.donePromise;
 
     assert.equal(res._send[0], 500);
-    assert.match(res._send[1], /workflow 触发失败/);
+    assert.equal(res._send[1], '部署失败，请查看服务端日志');
     assert.equal(res._done, undefined, '触发失败不应 res.done 成功响应');
 
     const status = deployStatusDb.getStatus();
     assert.equal(status.isDeploying, false);
     assert.equal(status.stage, 'failed');
-    assert.equal(status.error, 'workflow 触发失败');
+    assert.equal(status.error, '部署失败，请查看服务端日志');
 });
 
 test('deploy/execute：触发失败且恢复状态写入也故障时，客户端仍拿到 500', { timeout: 2000 }, async () => {
@@ -148,6 +148,6 @@ test('deploy/execute：触发失败且恢复状态写入也故障时，客户端
     await res.donePromise;
 
     assert.equal(res._send[0], 500, '恢复状态写入失败也不得阻断响应，客户端必须拿到 500');
-    assert.match(res._send[1], /workflow 触发失败/);
+    assert.equal(res._send[1], '部署失败，请查看服务端日志');
     assert.equal(res._done, undefined, '触发失败不应 res.done 成功响应');
 });

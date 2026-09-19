@@ -312,22 +312,22 @@ module.exports = function (app, hexo, use, db) {
                             } catch (triggerErr) {
                                 console.error('执行部署失败:', triggerErr);
                                 // 恢复状态写入失败也不得阻断响应，保证客户端一定拿到 500
-                                await updateStatus({ isDeploying: false, stage: 'failed', error: triggerErr.message }).catch((e) => {
+                                await updateStatus({ isDeploying: false, stage: 'failed', error: '部署失败，请查看服务端日志' }).catch((e) => {
                                     console.error('更新部署失败状态失败:', e);
                                 });
                                 addLog('deploy.failed');
-                                res.send(500, `执行部署失败: ${triggerErr.message}`);
+                                res.send(500, '部署失败，请查看服务端日志');
                             }
                         }
                     );
                 } catch (innerErr) {
                     console.error('执行部署失败:', innerErr);
-                    return res.send(500, `执行部署失败: ${innerErr.message}`);
+                    return res.send(500, '部署失败，请查看服务端日志');
                 }
             });
         } catch (error) {
             console.error('执行部署失败:', error);
-            res.send(500, `执行部署失败: ${error.message}`);
+            res.send(500, '部署失败，请查看服务端日志');
         }
     });
 
@@ -383,10 +383,12 @@ module.exports = function (app, hexo, use, db) {
                 await updateStatus({
                     isDeploying: false,
                     stage: 'failed',
-                    error: error.message
+                    error: '部署失败，请查看服务端日志'
+                }).catch((e) => {
+                    console.error('更新部署失败状态失败:', e);
                 });
                 addLog('deploy.failed');
-                addLog(error.message);
+                addLog('部署失败，请查看服务端日志');
             }
         })();
     }
