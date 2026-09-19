@@ -2,6 +2,7 @@ var moment = require('moment'),
     hfm = require('hexo-front-matter'),
     extend = require('extend');
 const utils = require('./utils');
+const { parsePost, parsePage } = require('../lib/content-store');
 //  yfm = util.yfm,
 //  escape = util.escape;
 
@@ -153,7 +154,14 @@ module.exports = function (model, unimark, update, callback, hexo) {
 
     post.save().then(async () => {
         // post 已被 extend(post, update) 更新，post.raw 是序列化后的新 markdown。
-        const saved = await hexo.store.upsert(post, unimark);
+        // 用 post.raw 重解析出新 doc（_id/permalink/source 均为新值），使 _id 与 permalink 恒一致。
+        const newDoc = post.layout === 'page'
+            ? parsePage(post.raw, post.source, hexo.config)
+            : parsePost(post.raw, post.source, post.published !== false, hexo.config);
+        const saved = await hexo.store.upsert(newDoc);
+        if (saved._id !== unimark) {
+            await hexo.store.remove(unimark);
+        }
         if (hexo.github) {
             await hexo.github.writeFile('source/' + post.source, raw, `Hexo Pro: update ${post.source}`);
             if (sourceChanged && prev_source && prev_source !== post.source) {

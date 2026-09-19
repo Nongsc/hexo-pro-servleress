@@ -71,39 +71,47 @@ module.exports = function (app, hexo, use) {
         return post
     }
     async function publish(permalink, body, res) {
-        permalink = utils.base64Decode(permalink);
-        const post = hexo.store.findByPermalink(permalink);
-        if (!post) return res.send(404, 'Post not found');
-        const oldSource = post.source;
-        const newSource = '_posts/' + path.basename(post.source);
-        const updated = _.cloneDeep(post);
-        updated.source = newSource;
-        updated.published = true;
-        updated.layout = 'post';
-        await hexo.store.upsert(updated, permalink);
-        if (hexo.github) {
-            await hexo.github.writeFile(`source/${newSource}`, updated.raw, `Hexo Pro: publish ${newSource}`);
-            await hexo.github.deleteFile(`source/${oldSource}`, `Hexo Pro: publish ${newSource}`);
+        try {
+            permalink = utils.base64Decode(permalink);
+            const post = hexo.store.findByPermalink(permalink);
+            if (!post) return res.send(404, 'Post not found');
+            const oldSource = post.source;
+            const newSource = '_posts/' + path.basename(post.source);
+            const updated = _.cloneDeep(post);
+            updated.source = newSource;
+            updated.published = true;
+            updated.layout = 'post';
+            await hexo.store.upsert(updated, permalink);
+            if (hexo.github) {
+                await hexo.github.writeFile(`source/${newSource}`, updated.raw, `Hexo Pro: publish ${newSource}`);
+                await hexo.github.deleteFile(`source/${oldSource}`, `Hexo Pro: publish ${newSource}`);
+            }
+            res.done(addIsDraft(hexo.store.findByPermalink(permalink)));
+        } catch (err) {
+            res.send(err && err.status ? err.status : 500, err && err.message ? err.message : String(err));
         }
-        res.done(addIsDraft(hexo.store.findByPermalink(permalink)));
     }
 
     async function unpublish(permalink, body, res) {
-        permalink = utils.base64Decode(permalink);
-        const post = hexo.store.findByPermalink(permalink);
-        if (!post) return res.send(404, 'Post not found');
-        const oldSource = post.source;
-        const newSource = '_drafts/' + path.basename(post.source);
-        const updated = _.cloneDeep(post);
-        updated.source = newSource;
-        updated.published = false;
-        updated.layout = 'post';
-        await hexo.store.upsert(updated, permalink);
-        if (hexo.github) {
-            await hexo.github.writeFile(`source/${newSource}`, updated.raw, `Hexo Pro: unpublish ${newSource}`);
-            await hexo.github.deleteFile(`source/${oldSource}`, `Hexo Pro: unpublish ${newSource}`);
+        try {
+            permalink = utils.base64Decode(permalink);
+            const post = hexo.store.findByPermalink(permalink);
+            if (!post) return res.send(404, 'Post not found');
+            const oldSource = post.source;
+            const newSource = '_drafts/' + path.basename(post.source);
+            const updated = _.cloneDeep(post);
+            updated.source = newSource;
+            updated.published = false;
+            updated.layout = 'post';
+            await hexo.store.upsert(updated, permalink);
+            if (hexo.github) {
+                await hexo.github.writeFile(`source/${newSource}`, updated.raw, `Hexo Pro: unpublish ${newSource}`);
+                await hexo.github.deleteFile(`source/${oldSource}`, `Hexo Pro: unpublish ${newSource}`);
+            }
+            res.done(addIsDraft(hexo.store.findByPermalink(permalink)));
+        } catch (err) {
+            res.send(err && err.status ? err.status : 500, err && err.message ? err.message : String(err));
         }
-        res.done(addIsDraft(hexo.store.findByPermalink(permalink)));
     }
 
     function formatDateTime(dateString) {
@@ -119,38 +127,42 @@ module.exports = function (app, hexo, use) {
         return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
     }
     async function remove(id, body, res) {
-        id = utils.base64Decode(id)
-        var post = hexo.store.findByPermalink(id)
-        if (!post) return res.send(404, "Post not found")
-        post = _.cloneDeep(post)
-
-        await hexo.store.remove(id)
-
-        // 写入回收站记录（使用全局数据库管理器）
         try {
-            const databaseManager = require('../lib/db');
-            if (databaseManager && databaseManager.isReady()) {
-                const { recycleDb } = databaseManager.getDatabases();
-                if (recycleDb) {
-                    recycleDb.insert({
-                        type: 'post',
-                        title: post.title,
-                        permalink: post.permalink,
-                        originalSource: post.source,
-                        raw: post.raw,
-                        discardedPath: null,
-                        isDraft: post.source && post.source.indexOf('_draft') === 0,
-                        deletedAt: new Date(),
-                    }, function () { });
+            id = utils.base64Decode(id)
+            var post = hexo.store.findByPermalink(id)
+            if (!post) return res.send(404, "Post not found")
+            post = _.cloneDeep(post)
+
+            await hexo.store.remove(id)
+
+            // 写入回收站记录（使用全局数据库管理器）
+            try {
+                const databaseManager = require('../lib/db');
+                if (databaseManager && databaseManager.isReady()) {
+                    const { recycleDb } = databaseManager.getDatabases();
+                    if (recycleDb) {
+                        recycleDb.insert({
+                            type: 'post',
+                            title: post.title,
+                            permalink: post.permalink,
+                            originalSource: post.source,
+                            raw: post.raw,
+                            discardedPath: null,
+                            isDraft: post.source && post.source.indexOf('_draft') === 0,
+                            deletedAt: new Date(),
+                        }, function () { });
+                    }
                 }
+            } catch (_) { }
+
+            if (hexo.github) {
+                await hexo.github.deleteFile('source/' + post.source, `Hexo Pro: remove ${post.source}`);
             }
-        } catch (_) { }
 
-        if (hexo.github) {
-            await hexo.github.deleteFile('source/' + post.source, `Hexo Pro: remove ${post.source}`);
+            res.done(addIsDraft(post))
+        } catch (err) {
+            res.send(err && err.status ? err.status : 500, err && err.message ? err.message : String(err));
         }
-
-        res.done(addIsDraft(post))
     }
 
     function loadBlogInfoList() {

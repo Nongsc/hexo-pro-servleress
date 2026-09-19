@@ -37,38 +37,42 @@ module.exports = function (app, hexo, use) {
         return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
     }
     async function remove(id, body, res) {
-        id = utils.base64Decode(id)
-        var page = hexo.store.findByPermalink(id)
-        if (!page) return res.send(404, "Post not found")
-        page = _.cloneDeep(page)
-
-        await hexo.store.remove(id)
-
-        // 写入回收站记录
         try {
-            const databaseManager = require('../lib/db');
-            if (databaseManager && databaseManager.isReady()) {
-                const { recycleDb } = databaseManager.getDatabases();
-                if (recycleDb) {
-                    recycleDb.insert({
-                        type: 'page',
-                        title: page.title,
-                        permalink: page.permalink,
-                        originalSource: page.source,
-                        raw: page.raw,
-                        discardedPath: null,
-                        isDraft: false,
-                        deletedAt: new Date(),
-                    }, function () { });
+            id = utils.base64Decode(id)
+            var page = hexo.store.findByPermalink(id)
+            if (!page) return res.send(404, "Post not found")
+            page = _.cloneDeep(page)
+
+            await hexo.store.remove(id)
+
+            // 写入回收站记录
+            try {
+                const databaseManager = require('../lib/db');
+                if (databaseManager && databaseManager.isReady()) {
+                    const { recycleDb } = databaseManager.getDatabases();
+                    if (recycleDb) {
+                        recycleDb.insert({
+                            type: 'page',
+                            title: page.title,
+                            permalink: page.permalink,
+                            originalSource: page.source,
+                            raw: page.raw,
+                            discardedPath: null,
+                            isDraft: false,
+                            deletedAt: new Date(),
+                        }, function () { });
+                    }
                 }
+            } catch (_) { }
+
+            if (hexo.github) {
+                await hexo.github.deleteFile('source/' + page.source, `Hexo Pro: remove ${page.source}`);
             }
-        } catch (_) { }
 
-        if (hexo.github) {
-            await hexo.github.deleteFile('source/' + page.source, `Hexo Pro: remove ${page.source}`);
+            res.done(addIsDraft(page))
+        } catch (err) {
+            res.send(err && err.status ? err.status : 500, err && err.message ? err.message : String(err));
         }
-
-        res.done(addIsDraft(page))
     }
 
     async function createPageManually(req, res) {
