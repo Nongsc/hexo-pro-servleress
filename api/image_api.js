@@ -4,6 +4,7 @@ const multer = require('multer');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const utils = require('./utils');
+const { isServerless } = require('../lib/config');
 
 // 第三方图床SDK
 let aliOSS = null;
@@ -41,6 +42,17 @@ function getStorageConfig() {
     };
 
     return config;
+}
+
+// serverless 环境下 local 图床守卫：serverless 文件系统只读、无法落盘，
+// 这类会读写 hexo.upload_dir 本地盘的操作（上传/列表/删除/移动/重命名/回收站/新建文件夹等）
+// 在 type === 'local' 时统一返回明确错误，避免崩溃。
+function guardServerlessLocal(type, res) {
+    if (isServerless() && type === 'local') {
+        res.send(400, 'serverless 环境请配置对象存储（COS/OSS/七牛）');
+        return true;
+    }
+    return false;
 }
 
 // 将 multer 提供的 originalname 从 latin1 纠正为 utf8，避免中文名乱码
@@ -266,6 +278,8 @@ module.exports = function (app, hexo, use, db) {
         const config = getStorageConfig();
         const type = ((req.query.storageType || config.type) || 'local').toLowerCase();
 
+        if (guardServerlessLocal(type, res)) return;
+
         try {
             if (type === 'local') {
                 const imagesDir = path.join(hexo.upload_dir, config.customPath);
@@ -434,6 +448,7 @@ module.exports = function (app, hexo, use, db) {
         try {
             const config = getStorageConfig();
             const type = ((req.query && req.query.storageType) || config.type || 'local').toLowerCase();
+            if (guardServerlessLocal(type, res)) return;
             const folder = (req.query && req.query.folder) || '';
             const recursive = String((req.query && req.query.recursive) || 'true') === 'true';
             const includeDrafts = String((req.query && req.query.includeDrafts) || 'true') === 'true';
@@ -489,6 +504,7 @@ module.exports = function (app, hexo, use, db) {
         try {
             const config = getStorageConfig();
             const type = ((req.body && req.body.storageType) || config.type || 'local').toLowerCase();
+            if (guardServerlessLocal(type, res)) return;
             const folder = (req.body && req.body.folder) || '';
             const recursive = Boolean(req.body && req.body.recursive);
             const includeDrafts = String((req.body && req.body.includeDrafts) ?? 'true') === 'true';
@@ -594,6 +610,8 @@ module.exports = function (app, hexo, use, db) {
         const folderName = req.body.folderName;
         const reqType = ((req.body && req.body.storageType) || (getStorageConfig().type || 'local')).toLowerCase();
 
+        if (guardServerlessLocal(reqType, res)) return;
+
         if (!folderName) {
             return res.send(400, '文件夹名称不能为空');
         }
@@ -636,6 +654,8 @@ module.exports = function (app, hexo, use, db) {
         const { folder, storageType, recursive } = req.body || {};
         const config = getStorageConfig();
         const type = ((storageType) || config.type || 'local').toLowerCase();
+
+        if (guardServerlessLocal(type, res)) return;
 
         // 校验 folder
         if (!folder || typeof folder !== 'string') {
@@ -706,6 +726,8 @@ module.exports = function (app, hexo, use, db) {
         const config = getStorageConfig();
         const type = ((req.body && req.body.storageType) || (req.query && req.query.storageType) || config.type || 'local').toLowerCase();
 
+        if (guardServerlessLocal(type, res)) return;
+
         if (type === 'local') {
             const fullPath = path.join(hexo.upload_dir, String(imagePath).replace(/^\/+/, ''));
             try {
@@ -740,6 +762,8 @@ module.exports = function (app, hexo, use, db) {
         const config = getStorageConfig();
         const type = ((req.body && req.body.storageType) || (req.query && req.query.storageType) || config.type || 'local').toLowerCase();
 
+        if (guardServerlessLocal(type, res)) return;
+
         try {
             if (type === 'local') {
                 let deleted = 0;
@@ -773,6 +797,8 @@ module.exports = function (app, hexo, use, db) {
             'local'
         ).toLowerCase();
 
+        if (guardServerlessLocal(reqType, res)) return;
+
         // 根据请求或配置的存储类型处理上传
         if (reqType === 'local') {
             handleLocalUpload(req, res, next, config);
@@ -799,6 +825,8 @@ module.exports = function (app, hexo, use, db) {
             config.type ||
             'local'
         ).toLowerCase();
+
+        if (guardServerlessLocal(reqType, res)) return;
 
         const rawUrls = Array.isArray(req.body && req.body.urls) ? req.body.urls : [];
         if (!rawUrls.length) {
@@ -1068,6 +1096,8 @@ module.exports = function (app, hexo, use, db) {
         const config = getStorageConfig();
         const type = ((req.body && req.body.storageType) || config.type || 'local').toLowerCase();
 
+        if (guardServerlessLocal(type, res)) return;
+
         if (type === 'local') {
             const fullOldPath = path.join(hexo.upload_dir, oldPath);
             if (!fs.existsSync(fullOldPath)) {
@@ -1128,6 +1158,8 @@ module.exports = function (app, hexo, use, db) {
 
         const config = getStorageConfig();
         const type = ((req.body && req.body.storageType) || (req.query && req.query.storageType) || config.type || 'local').toLowerCase();
+
+        if (guardServerlessLocal(type, res)) return;
 
         if (type === 'local') {
             const fullPath = path.join(hexo.upload_dir, imagePath);
