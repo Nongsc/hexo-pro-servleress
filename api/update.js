@@ -1,8 +1,5 @@
-var path = require('path'),
-    nodeFs = require('fs'),
-    moment = require('moment'),
+var moment = require('moment'),
     hfm = require('hexo-front-matter'),
-    fs = require('hexo-fs'),
     extend = require('extend');
 const utils = require('./utils');
 //  yfm = util.yfm,
@@ -98,24 +95,18 @@ module.exports = function (model, unimark, update, callback, hexo) {
     Object.keys(hexo.config.metadata || {}).forEach(function (key) {
         preservedKeys.push(key);
     });
-    var prev_full = post.full_source,
-        full_source = prev_full;
+    var prev_source = post.source;
     let sourceChanged = false
     if (update.source && update.source !== post.source) {
         const normalizedSource = String(update.source).replace(/^[/\\]+/, '')
-        const requestedFullSource = path.join(hexo.source_dir, normalizedSource)
-        const targetExists = requestedFullSource !== prev_full && nodeFs.existsSync(requestedFullSource)
+        const conflict = hexo.store.models.Post.find(d => d.source === normalizedSource && d._id !== post._id).length > 0
 
-        if (targetExists) {
-            // 目标文件已存在（可能属于其他文章），为避免覆盖，放弃 source 变更。
-            delete update.source
-            full_source = prev_full
-            sourceChanged = false
-        } else {
-            // post.full_source only readable ~ see: /hexo/lib/models/post.js
-            full_source = requestedFullSource
+        if (!conflict) {
+            post.source = normalizedSource
             sourceChanged = true
         }
+        // 始终从 update 中移除 source，避免后续 extend(post, update) 覆盖已规范化的 post.source。
+        delete update.source
     }
 
     preservedKeys.forEach(function (attr) {
@@ -161,24 +152,16 @@ module.exports = function (model, unimark, update, callback, hexo) {
     extend(post, update)
 
     post.save().then(async () => {
-        const sourceDir = path.dirname(full_source)
-        if (!nodeFs.existsSync(sourceDir)) {
-            nodeFs.mkdirSync(sourceDir, { recursive: true })
-        }
-        fs.writeFileSync(full_source, raw);
-
-        // 标题改名会变更 source：清理旧文件，避免旧文章残留导致重复。
-        if (sourceChanged && prev_full && prev_full !== full_source && nodeFs.existsSync(prev_full)) {
-            nodeFs.unlinkSync(prev_full)
+        // post 已被 extend(post, update) 更新，post.raw 是序列化后的新 markdown。
+        const saved = await hexo.store.upsert(post, unimark);
+        if (hexo.github) {
+            await hexo.github.writeFile('source/' + post.source, raw, `Hexo Pro: update ${post.source}`);
+            if (sourceChanged && prev_source && prev_source !== post.source) {
+                await hexo.github.deleteFile('source/' + prev_source, `Hexo Pro: rename ${prev_source}`);
+            }
         }
         hexo.log.info('文章保存成功！');
-        await hexo.source.process().then(function () {
-            //      console.log(post.full_source, post.source)
-            callback(null, hexo.model(model).filter(post => {
-                const permalink = post.permalink;
-                return unimark === permalink;
-            }).data[0]);
-        });
+        callback(null, saved);
     }).catch(err => {
         hexo.log.error('保存失败:', err);
         callback(err, null);

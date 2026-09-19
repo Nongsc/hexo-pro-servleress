@@ -1,15 +1,12 @@
-var path = require('path')
 var url = require('url')
-var fs = require('hexo-fs')
-var fse = require('fs-extra')
 var yml = require('js-yaml')
 var updateAny = require('./update'),
     update = updateAny.bind(null, 'Page')
-var extend = require('extend')
 const _ = require('lodash')
 var hfm = require('hexo-front-matter')
 
 const utils = require('./utils');
+const { parsePage } = require('../lib/content-store');
 
 module.exports = function (app, hexo, use) {
     function addIsDraft(post) {
@@ -39,60 +36,39 @@ module.exports = function (app, hexo, use) {
 
         return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
     }
-    function remove(id, body, res) {
+    async function remove(id, body, res) {
         id = utils.base64Decode(id)
-        var page = hexo.model('Page').filter(p => p.permalink === id).data[0]
+        var page = hexo.store.findByPermalink(id)
         if (!page) return res.send(404, "Post not found")
+        page = _.cloneDeep(page)
 
-        // 生成唯一路径：_discarded/<timestamp>/original_path
-        const timestamp = Date.now()
-        const originalFilename = path.basename(page.source)
-        const originalDirname = path.dirname(page.source);
-        const newSource = path.join('_discarded', String(timestamp), originalDirname, originalFilename);
+        await hexo.store.remove(id)
 
-        // 物理移动文件
-        const oldPath = path.join(hexo.source_dir, page.source)
-        const newDir = path.join(hexo.source_dir, path.dirname(newSource))
-        const newPath = path.join(newDir, originalFilename)
+        // 写入回收站记录
+        try {
+            const databaseManager = require('../lib/db');
+            if (databaseManager && databaseManager.isReady()) {
+                const { recycleDb } = databaseManager.getDatabases();
+                if (recycleDb) {
+                    recycleDb.insert({
+                        type: 'page',
+                        title: page.title,
+                        permalink: page.permalink,
+                        originalSource: page.source,
+                        raw: page.raw,
+                        discardedPath: null,
+                        isDraft: false,
+                        deletedAt: new Date(),
+                    }, function () { });
+                }
+            }
+        } catch (_) { }
 
-        // 使用 fse 移动文件到新路径下
-        fse.ensureDir(newDir, err => {
-            if (err) return res.send(500, `Failed to create directory: ${err.message}`);
-            fse.move(oldPath, newPath, { overwrite: false }, err => {
-                if (err) return res.send(500, `File operation failed: ${err.message}`);
+        if (hexo.github) {
+            await hexo.github.deleteFile('source/' + page.source, `Hexo Pro: remove ${page.source}`);
+        }
 
-                // 从数据模型中删除页面记录
-                hexo.model('Page').remove({ _id: page._id }, err => {
-                    if (err) return res.send(500, `Failed to remove page from model: ${err.message}`);
-
-                    // 刷新 Hexo 数据
-                    hexo.source.process().then(() => {
-                        // 写入回收站记录
-                        try {
-                            const databaseManager = require('../lib/db');
-                            if (databaseManager && databaseManager.isReady()) {
-                                const { recycleDb } = databaseManager.getDatabases();
-                                if (recycleDb) {
-                                    recycleDb.insert({
-                                        type: 'page',
-                                        title: page.title,
-                                        permalink: page.permalink,
-                                        originalSource: page.source,
-                                        discardedPath: newSource.replace(/\\/g, '/'),
-                                        isDraft: false,
-                                        deletedAt: new Date(),
-                                    }, function () { });
-                                }
-                            }
-                        } catch (_) { }
-                        res.done(addIsDraft(page))
-                    }).catch(e => {
-                        console.error(e, e.stack)
-                        res.send(500, 'Failed to refresh data')
-                    })
-                });
-            });
-        });
+        res.done(addIsDraft(page))
     }
 
     async function createPageManually(req, res) {
@@ -106,15 +82,13 @@ module.exports = function (app, hexo, use) {
         }
 
         try {
-            // 循环生成唯一文件名，避免重试时时间戳冲突导致创建失败
+            // 循环生成唯一标题，避免重试时时间戳冲突导致创建失败
             let title = requestedTitle;
-            let filePath = path.join(hexo.source_dir, `${title}/index.md`);
             let attempt = 0;
 
-            while (fse.pathExistsSync(filePath)) {
+            while (hexo.store.models.Page.find(d => d.source === `${title}/index.md`).length > 0) {
                 const suffix = `${Date.now()}${attempt ? `-${attempt}` : ''}`;
                 title = `${requestedTitle}${suffix}`;
-                filePath = path.join(hexo.source_dir, `${title}/index.md`);
                 attempt += 1;
                 if (attempt > 1000) {
                     throw new Error('Failed to generate unique page filename');
@@ -129,26 +103,20 @@ module.exports = function (app, hexo, use) {
             };
             const pageContent = hfm.stringify(frontMatter);
 
-            // 使用 Promise 风格，避免 callback + await 混用导致请求悬挂
-            await fs.writeFile(filePath, pageContent);
+            const source = `${title}/index.md`;
+            const page = parsePage(pageContent, source, hexo.config);
+            const saved = await hexo.store.upsert(page);
 
-            const source = filePath.slice(hexo.source_dir.length).replace(/\\/g, '/');
-            await hexo.source.process([source]);
-
-            let page = hexo.model('Page').findOne({ source });
-            if (!page) {
-                page = hexo.model('Page').findOne({ title });
-            }
-            if (!page) {
-                return res.send(500, 'Page created but failed to index');
+            if (hexo.github) {
+                await hexo.github.writeFile(`source/${source}`, pageContent, `Hexo Pro: create page ${source}`);
             }
 
             if (title !== requestedTitle) {
-                page.titleChanged = true;
-                page.originalTitle = requestedTitle;
+                saved.titleChanged = true;
+                saved.originalTitle = requestedTitle;
             }
 
-            return res.done(addFormatDateTime(page));
+            return res.done(addFormatDateTime(saved));
         } catch (e) {
             console.error(e);
             return res.send(500, e?.message || 'Failed to create page');
@@ -167,8 +135,7 @@ module.exports = function (app, hexo, use) {
             return res.send(400, 'No path provided');
         }
 
-        const filePath = path.join(hexo.source_dir, pagePath);
-        const exists = fse.pathExistsSync(filePath);
+        const exists = hexo.store.models.Page.find(d => d.source === pagePath).length > 0;
 
         return res.done({ exists });
     });
@@ -333,28 +300,26 @@ module.exports = function (app, hexo, use) {
             }
             post = _.cloneDeep(post);
 
-            // 如果是更新标题，则尝试同步重命名页面文件夹（<title>/index.md）
+            // 如果是更新标题，则同步重命名页面目录（<title>/index.md）：只改 DB source + GitHub 写新删旧
             if (key === 'title' && typeof value === 'string' && value.trim()) {
                 try {
-                    const oldAbs = path.join(hexo.source_dir, post.source);
-                    const oldDir = path.dirname(oldAbs);
-                    const parentDir = path.dirname(oldDir);
-                    const newDirName = value.trim();
-                    let targetDirAbs = path.join(parentDir, newDirName);
-                    if (fse.pathExistsSync(targetDirAbs)) {
+                    const oldSource = post.source;
+                    const oldPermalink = post.permalink;
+                    let newSource = `${value.trim()}/index.md`;
+                    if (hexo.store.models.Page.find(d => d.source === newSource).length > 0) {
                         // 若已存在同名目录，添加时间戳避免冲突
-                        targetDirAbs = path.join(parentDir, `${newDirName} (${Date.now()})`);
+                        newSource = `${value.trim()} (${Date.now()})/index.md`;
                     }
-                    // 重命名目录以保留目录内资源
-                    fse.moveSync(oldDir, targetDirAbs, { overwrite: false });
-                    // 让 Hexo 重新处理
-                    await hexo.source.process();
-                    // 从模型中读取最新页面数据
-                    const rel = path.relative(hexo.source_dir, path.join(targetDirAbs, path.basename(oldAbs))).replace(/\\/g, '/');
-                    const updatedPage = hexo.model('Page').findOne({ source: rel });
-                    if (updatedPage) {
-                        return res.done(addIsDraft(updatedPage));
+                    post.source = newSource;
+                    // 重解析派生新 permalink，_id 随之更新；旧 permalink 记录已在上方移除
+                    post._id = parsePage(post.raw, newSource, hexo.config)._id;
+                    await hexo.store.remove(oldPermalink);
+                    const saved = await hexo.store.upsert(post);
+                    if (hexo.github) {
+                        await hexo.github.writeFile('source/' + newSource, post.raw, `Hexo Pro: rename page ${newSource}`);
+                        await hexo.github.deleteFile('source/' + oldSource, `Hexo Pro: rename page ${oldSource}`);
                     }
+                    return res.done(addIsDraft(saved));
                 } catch (e) {
                     // 如果目录重命名失败，不影响标题更新
                     console.warn('[Pages API] 重命名页面目录失败:', e && e.message);
