@@ -2,3 +2,5 @@ node_modules/
 content/
 .env
 *.log
+data/
+uploads/
