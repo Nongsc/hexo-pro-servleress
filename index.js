@@ -27,7 +27,7 @@ async function main() {
   const databaseManager = require('./lib/db');
   const { GitHubClient } = require('./lib/github');
   const { SiteConfigStore } = require('./lib/site-config');
-  const { ContentStore, parsePost, parsePage } = require('./lib/content-store');
+  const { ContentStore } = require('./lib/content-store');
   const HexoShim = require('./lib/hexo-shim');
   const yaml = require('js-yaml');
 
@@ -110,6 +110,7 @@ async function ensureSiteConfig(siteConfig, github) {
 }
 
 async function importFromGithub(github, store) {
+  const { parsePost, parsePage } = require('./lib/content-store');
   let paths;
   try {
     paths = await github.listTree();
