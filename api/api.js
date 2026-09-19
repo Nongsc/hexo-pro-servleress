@@ -246,7 +246,7 @@ module.exports = async function (app, hexo) { // 将导出函数改为 async
 
         // 注册所有 API 路由
         login_api(app, hexo, use, db); // 移除不再需要的参数
-        post_api(app, hexo, use);
+        post_api(app, hexo, use, db);
         page_api(app, hexo, use);
         image_api(app, hexo, use, db); // 注册图片API并传入数据库实例以持久化图床配置
         yaml_api(app, hexo, use);

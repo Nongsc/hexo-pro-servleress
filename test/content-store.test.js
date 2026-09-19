@@ -33,25 +33,19 @@ test('serialize 与 parsePost 字段往返一致', () => {
   assert.deepEqual(doc2.tags, ['a', 'b']);
 });
 
-test('_rebuild 写出 blogInfoList.json 且条目正确', () => {
+test('_rebuild 不再写出 blogInfoList.json（blogInfoList 改由 store.models 现算）', () => {
   const base_dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexo-'));
   const store = new ContentStore({ base_dir, config: CONFIG, log: { error: () => {} } }, null);
   const postDoc = parsePost(RAW, '_posts/hello.md', true, CONFIG);
   const pageDoc = parsePage('---\ntitle: About\n---\n关于', 'about/index.md', CONFIG);
   store._rebuild([postDoc, pageDoc]);
-  const list = JSON.parse(fs.readFileSync(path.join(base_dir, 'blogInfoList.json'), 'utf8'));
-  assert.equal(list.length, 2);
-  const post = list.find(x => !x.isPage);
-  const page = list.find(x => x.isPage);
-  assert.ok(post);
-  assert.equal(post.title, 'Hello');
-  assert.equal(post.isDraft, false);
-  assert.equal(post.permalink, postDoc.permalink);
-  assert.ok(page);
-  assert.equal(page.title, 'About');
-  assert.equal(page.isPage, true);
-  assert.equal(page.isDraft, false);
-  assert.equal(page.permalink, pageDoc.permalink);
+
+  assert.equal(fs.existsSync(path.join(base_dir, 'blogInfoList.json')), false, '_rebuild 不应写 blogInfoList.json');
+  assert.deepEqual(fs.readdirSync(base_dir), [], '_rebuild 不应在 base_dir 写任何文件');
+
+  // 重建后模型已就位，供 post_api 现算 blogInfoList
+  assert.equal(store.models.Post.toArray().length, 1);
+  assert.equal(store.models.Page.toArray().length, 1);
 });
 
 function makeMemDb() {
