@@ -12,11 +12,21 @@ function fakeDb() {
   };
 }
 
+function fakeGithub() {
+  const calls = [];
+  return {
+    calls,
+    writeFile: async (...args) => { calls.push(args); return {}; }
+  };
+}
+
 test('get/set 往返（sync:false 不触发 GitHub）', async () => {
-  const store = new SiteConfigStore(fakeDb(), { writeFile: async () => ({}) });
+  const github = fakeGithub();
+  const store = new SiteConfigStore(fakeDb(), github);
   await store.set('site', 'title: X', { sync: false });
   const v = await store.get('site');
   assert.equal(v, 'title: X');
+  assert.equal(github.calls.length, 0, 'sync:false 不应调用 writeFile');
 });
 
 test('githubPath 映射', () => {
@@ -24,4 +34,29 @@ test('githubPath 映射', () => {
   assert.equal(store.githubPath('site'), '_config.yml');
   assert.equal(store.githubPath('theme:landscape'), '_config.landscape.yml');
   assert.equal(store.githubPath('templates'), '_yaml_templates/templates.json');
+});
+
+test('set 默认 sync 时按 githubPath 写入并使用默认 message', async () => {
+  const github = fakeGithub();
+  const store = new SiteConfigStore(fakeDb(), github);
+  const content = 'title: Y';
+  await store.set('theme:landscape', content);
+  assert.deepEqual(github.calls, [
+    ['_config.landscape.yml', content, 'Hexo Pro: update theme:landscape']
+  ]);
+});
+
+test('set 支持自定义 message', async () => {
+  const github = fakeGithub();
+  const store = new SiteConfigStore(fakeDb(), github);
+  await store.set('site', 'title: Z', { message: 'Hexo Pro: custom' });
+  assert.deepEqual(github.calls, [['_config.yml', 'title: Z', 'Hexo Pro: custom']]);
+});
+
+test('githubPath 为 null 的 type 不写入 GitHub，但仍持久化', async () => {
+  const github = fakeGithub();
+  const store = new SiteConfigStore(fakeDb(), github);
+  await store.set('snapshot:site', 'c1');
+  assert.equal(github.calls.length, 0, 'githubPath 为 null 时不应调用 writeFile');
+  assert.equal(await store.get('snapshot:site'), 'c1');
 });
