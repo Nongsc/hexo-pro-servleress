@@ -1,6 +1,3 @@
-const path = require('path')
-const fs = require('hexo-fs')
-const fse = require('fs-extra');
 const _ = require('lodash')
 const axios = require('axios'); // 需要安装axios
 
@@ -126,12 +123,22 @@ module.exports = function (app, hexo, use, db) {
     // 获取系统信息
     use('dashboard/system/info', async function (req, res) {
         try {
-            // 读取package.json获取Hexo版本
-            const packagePath = path.join(hexo.base_dir, 'node_modules/hexo/package.json')
+            // 读取本项目 package.json（不再依赖 node_modules 结构）
+            let pkg = null
             let hexoVersion = 'Unknown'
-            if (fs.existsSync(packagePath)) {
-                const packageInfo = JSON.parse(fs.readFileSync(packagePath))
-                hexoVersion = packageInfo.version
+            let plugins = []
+            try {
+                pkg = require('../package.json')
+                hexoVersion = pkg.version || 'Unknown'
+                plugins = Object.keys(pkg.dependencies || {})
+                    .filter(d => d.startsWith('hexo-'))
+                    .map(name => ({
+                        name: name,
+                        version: String(pkg.dependencies[name]).replace(/^[^\d]*/, ''),
+                        enabled: true
+                    }))
+            } catch (e) {
+                // 理论上不会发生；保持兜底值 Unknown / []
             }
 
             // 获取当前主题
@@ -139,30 +146,6 @@ module.exports = function (app, hexo, use, db) {
 
             // 获取作者信息
             const author = hexo.config.author || ''
-
-            // 获取插件列表
-            const plugins = []
-            const pluginsDir = path.join(hexo.base_dir, 'node_modules')
-            if (fs.existsSync(pluginsDir)) {
-                const dirs = fs.readdirSync(pluginsDir)
-                dirs.forEach(dir => {
-                    if (dir.startsWith('hexo-')) {
-                        const pluginPackagePath = path.join(pluginsDir, dir, 'package.json')
-                        if (fs.existsSync(pluginPackagePath)) {
-                            try {
-                                const pluginInfo = JSON.parse(fse.readFileSync(pluginPackagePath))
-                                plugins.push({
-                                    name: pluginInfo.name,
-                                    version: pluginInfo.version,
-                                    enabled: true // 默认为启用状态
-                                })
-                            } catch (e) {
-                                console.error(`读取插件${dir}信息失败:`, e)
-                            }
-                        }
-                    }
-                })
-            }
 
             // 获取最近部署时间（从部署状态表读取）
             let lastDeployTime = '未知'
