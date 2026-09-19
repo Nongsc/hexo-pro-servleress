@@ -256,7 +256,7 @@ module.exports = function (app, hexo, use, db) {
         destination: function (req, file, cb) {
             // 获取配置中的路径
             const config = getStorageConfig();
-            const imagesDir = path.join(hexo.source_dir, config.customPath);
+            const imagesDir = path.join(hexo.upload_dir, config.customPath);
             fs.ensureDirSync(imagesDir);
             cb(null, imagesDir);
         },
@@ -281,7 +281,7 @@ module.exports = function (app, hexo, use, db) {
 
         try {
             if (type === 'local') {
-                const imagesDir = path.join(hexo.source_dir, config.customPath);
+                const imagesDir = path.join(hexo.upload_dir, config.customPath);
                 // 迁移旧版本 .trash 到可预览的 trash 目录
                 try { migrateLocalTrash(imagesDir); } catch (_) { }
                 const targetDir = folder ? path.join(imagesDir, folder) : imagesDir;
@@ -554,12 +554,12 @@ module.exports = function (app, hexo, use, db) {
             }
 
             if (type === 'local') {
-                const baseImagesDir = path.join(hexo.source_dir, config.customPath);
+                const baseImagesDir = path.join(hexo.upload_dir, config.customPath);
                 const trashRoot = path.join(baseImagesDir, 'trash', formatTimestampFolder(new Date()));
                 fs.ensureDirSync(trashRoot);
 
                 for (const key of targets) {
-                    const abs = path.join(hexo.source_dir, key);
+                    const abs = path.join(hexo.upload_dir, key);
                     try {
                         if (!fs.existsSync(abs)) continue;
                         if (useRecycleBin) {
@@ -619,7 +619,7 @@ module.exports = function (app, hexo, use, db) {
         if (reqType === 'local') {
             // 获取配置中的路径
             const config = getStorageConfig();
-            const folderPath = path.join(hexo.source_dir, config.customPath, folderName);
+            const folderPath = path.join(hexo.upload_dir, config.customPath, folderName);
 
             try {
                 if (fs.existsSync(folderPath)) {
@@ -661,7 +661,7 @@ module.exports = function (app, hexo, use, db) {
 
         try {
             if (type === 'local') {
-                const baseDir = path.join(hexo.source_dir, config.customPath, normalizedFolder);
+                const baseDir = path.join(hexo.upload_dir, config.customPath, normalizedFolder);
                 if (!fs.existsSync(baseDir)) {
                     return res.send(404, '文件夹不存在');
                 }
@@ -720,7 +720,7 @@ module.exports = function (app, hexo, use, db) {
         const type = ((req.body && req.body.storageType) || (req.query && req.query.storageType) || config.type || 'local').toLowerCase();
 
         if (type === 'local') {
-            const fullPath = path.join(hexo.source_dir, String(imagePath).replace(/^\/+/, ''));
+            const fullPath = path.join(hexo.upload_dir, String(imagePath).replace(/^\/+/, ''));
             try {
                 if (!fs.existsSync(fullPath)) {
                     return res.send(404, '图片不存在');
@@ -757,7 +757,7 @@ module.exports = function (app, hexo, use, db) {
             if (type === 'local') {
                 let deleted = 0;
                 for (const p of paths) {
-                    const fullPath = path.join(hexo.source_dir, String(p).replace(/^\/+/, ''));
+                    const fullPath = path.join(hexo.upload_dir, String(p).replace(/^\/+/, ''));
                     if (fs.existsSync(fullPath)) {
                         try { fs.removeSync(fullPath); deleted++; } catch (_) { }
                     }
@@ -957,7 +957,7 @@ module.exports = function (app, hexo, use, db) {
 
                 try {
                     const folder = req.body.folder || '';
-                    const sourceImagesDir = path.join(hexo.source_dir, config.customPath);
+                    const sourceImagesDir = path.join(hexo.upload_dir, config.customPath);
                     const targetDir = folder ? path.join(sourceImagesDir, folder) : sourceImagesDir;
                     fs.ensureDirSync(targetDir);
 
@@ -1021,7 +1021,7 @@ module.exports = function (app, hexo, use, db) {
                     if (!filename.endsWith(`.${extension}`)) filename = `${filename}.${extension}`;
                 }
 
-                const targetDir = subFolder ? path.join(hexo.source_dir, config.customPath, subFolder) : path.join(hexo.source_dir, config.customPath);
+                const targetDir = subFolder ? path.join(hexo.upload_dir, config.customPath, subFolder) : path.join(hexo.upload_dir, config.customPath);
                 fs.ensureDirSync(targetDir);
                 let finalName = filename;
                 let finalPath = path.join(targetDir, finalName);
@@ -1082,7 +1082,7 @@ module.exports = function (app, hexo, use, db) {
         const type = ((req.body && req.body.storageType) || config.type || 'local').toLowerCase();
 
         if (type === 'local') {
-            const fullOldPath = path.join(hexo.source_dir, oldPath);
+            const fullOldPath = path.join(hexo.upload_dir, oldPath);
             if (!fs.existsSync(fullOldPath)) {
                 return res.send(404, '图片不存在');
             }
@@ -1095,7 +1095,7 @@ module.exports = function (app, hexo, use, db) {
             }
             try {
                 fs.renameSync(fullOldPath, fullNewPath);
-                const relativePath = path.relative(hexo.source_dir, fullNewPath).replace(/\\/g, '/');
+                const relativePath = path.relative(hexo.upload_dir, fullNewPath).replace(/\\/g, '/');
                 return res.done({
                     success: true,
                     newPath: `/${relativePath}`,
@@ -1143,7 +1143,7 @@ module.exports = function (app, hexo, use, db) {
         const type = ((req.body && req.body.storageType) || (req.query && req.query.storageType) || config.type || 'local').toLowerCase();
 
         if (type === 'local') {
-            const fullPath = path.join(hexo.source_dir, imagePath);
+            const fullPath = path.join(hexo.upload_dir, imagePath);
 
             if (!fs.existsSync(fullPath)) {
                 return res.send(404, '图片不存在');
@@ -1151,8 +1151,8 @@ module.exports = function (app, hexo, use, db) {
 
             const fileName = path.basename(fullPath);
             const targetDir = targetFolder
-                ? path.join(hexo.source_dir, config.customPath, targetFolder)
-                : path.join(hexo.source_dir, config.customPath);
+                ? path.join(hexo.upload_dir, config.customPath, targetFolder)
+                : path.join(hexo.upload_dir, config.customPath);
 
             // 确保目标目录存在
             fs.ensureDirSync(targetDir);
@@ -1171,7 +1171,7 @@ module.exports = function (app, hexo, use, db) {
                 fs.moveSync(fullPath, targetPath);
 
                 // 计算新的相对路径
-                const relativePath = path.relative(hexo.source_dir, targetPath).replace(/\\/g, '/');
+                const relativePath = path.relative(hexo.upload_dir, targetPath).replace(/\\/g, '/');
 
                 return res.done({
                     success: true,
@@ -1879,7 +1879,7 @@ module.exports = function (app, hexo, use, db) {
         const folder = (opts && opts.folder) || '';
         const recursive = Boolean(opts && opts.recursive);
         if (type === 'local') {
-            const imagesDir = path.join(hexo.source_dir, config.customPath);
+            const imagesDir = path.join(hexo.upload_dir, config.customPath);
             const baseDir = folder ? path.join(imagesDir, folder) : imagesDir;
             fs.ensureDirSync(baseDir);
             const out = [];
@@ -1911,7 +1911,7 @@ module.exports = function (app, hexo, use, db) {
         const includeDrafts = (opts && opts.includeDrafts) !== false;
         const referenced = new Set();
         // 提取所有源内容文件
-        const sourceDir = path.resolve(hexo.source_dir);
+        const sourceDir = path.resolve(hexo.upload_dir);
         const candidates = [];
         const tryPush = (p) => { if (fs.existsSync(p)) candidates.push(p); };
         tryPush(path.join(sourceDir, '_posts'));

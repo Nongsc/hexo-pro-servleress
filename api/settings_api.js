@@ -648,7 +648,7 @@ module.exports = function(app, hexo, use, db) {
     const newFilename = `avatar_${username}_${Date.now()}${ext}`;
     
     // 确定保存路径 - 使用图床根目录
-    const imagesDir = path.join(hexo.source_dir, 'images');
+    const imagesDir = path.join(hexo.upload_dir, 'images');
     
     // 确保目录存在
     fs.ensureDirSync(imagesDir);

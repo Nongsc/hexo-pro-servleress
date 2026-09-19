@@ -250,7 +250,7 @@ module.exports = async function (app, hexo) { // 将导出函数改为 async
         page_api(app, hexo, use);
         image_api(app, hexo, use, db); // 注册图片API并传入数据库实例以持久化图床配置
         yaml_api(app, hexo, use);
-        dashboard_api(app, hexo, use); // 注册仪表盘API
+        dashboard_api(app, hexo, use, db); // 注册仪表盘API
         deploy_api(app, hexo, use, db); // 传递数据库实例到部署API
         settings_api(app, hexo, use, db); // 注册设置API
         recycle_api(app, hexo, use, db); // 注册回收站API

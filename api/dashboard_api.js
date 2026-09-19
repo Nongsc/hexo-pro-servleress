@@ -4,7 +4,7 @@ const fse = require('fs-extra');
 const _ = require('lodash')
 const axios = require('axios'); // 需要安装axios
 
-module.exports = function (app, hexo, use) {
+module.exports = function (app, hexo, use, db) {
     // 获取文章统计数据
     use('dashboard/posts/stats', function (req, res) {
         try {
@@ -109,7 +109,7 @@ module.exports = function (app, hexo, use) {
     })
 
     // 获取系统信息
-    use('dashboard/system/info', function (req, res) {
+    use('dashboard/system/info', async function (req, res) {
         try {
             // 读取package.json获取Hexo版本
             const packagePath = path.join(hexo.base_dir, 'node_modules/hexo/package.json')
@@ -149,26 +149,11 @@ module.exports = function (app, hexo, use) {
                 })
             }
 
-            // 获取最近部署时间（这里使用一个模拟值，实际应该从部署记录中获取）
-            const deployLogPath = path.join(hexo.base_dir, '.deploy_git/.git/logs/HEAD')
+            // 获取最近部署时间（从部署状态表读取）
             let lastDeployTime = '未知'
-            if (fs.existsSync(deployLogPath)) {
-                try {
-                    const logs = fse.readFileSync(deployLogPath, 'utf-8')
-                    const lines = logs.split('\n')
-                    if (lines.length > 0) {
-                        const lastLine = lines[lines.length - 2] // 最后一行通常是空行，所以取倒数第二行
-                        if (lastLine) {
-                            const match = lastLine.match(/>\s(\d+)\s/)
-                            if (match && match[1]) {
-                                const timestamp = parseInt(match[1])
-                                lastDeployTime = formatDateTime(new Date(timestamp * 1000))
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.error('读取部署日志失败:', e)
-                }
+            if (db && db.deployStatusDb) {
+                const st = await new Promise((resolve) => db.deployStatusDb.findOne({ type: 'status' }, (e, d) => resolve(d)))
+                if (st && st.lastDeployTime) lastDeployTime = st.lastDeployTime
             }
 
             res.done({
