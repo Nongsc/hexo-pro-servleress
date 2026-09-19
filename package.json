@@ -4,7 +4,7 @@
   "description": "Hexo Pro standalone backend — hexo-free admin server backed by git + Neon PostgreSQL",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node server.js",
     "test": "node --test"
   },
   "dependencies": {
