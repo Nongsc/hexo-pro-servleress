@@ -1920,36 +1920,6 @@ module.exports = function (app, hexo, use, db) {
     async function collectReferencedImageKeys(hexo, config, type, opts) {
         const includeDrafts = (opts && opts.includeDrafts) !== false;
         const referenced = new Set();
-        // 提取所有源内容文件
-        const sourceDir = path.resolve(hexo.upload_dir);
-        const candidates = [];
-        const tryPush = (p) => { if (fs.existsSync(p)) candidates.push(p); };
-        tryPush(path.join(sourceDir, '_posts'));
-        if (includeDrafts) tryPush(path.join(sourceDir, '_drafts'));
-        // 也扫描 source 根下其他 md/html
-        tryPush(sourceDir);
-
-        const exts = new Set(['.md', '.markdown', '.mdx', '.html', '.htm', '.yml', '.yaml']);
-        const files = [];
-        const walk = (dir) => {
-            const items = fs.readdirSync(dir);
-            for (const it of items) {
-                const p = path.join(dir, it);
-                const st = fs.statSync(p);
-                if (st.isDirectory()) {
-                    // 跳过 images 目录本身以提升性能
-                    if (path.resolve(p) === path.resolve(sourceDir, config.customPath)) continue;
-                    // 跳过 .trash
-                    if (it === 'trash') continue;
-                    walk(p);
-                } else if (st.isFile()) {
-                    if (exts.has(path.extname(it).toLowerCase())) files.push(p);
-                }
-            }
-        };
-        for (const c of candidates) {
-            if (fs.existsSync(c)) walk(c);
-        }
 
         const localBase = config.customPath.replace(/^\/+/, '');
         const stripDomains = [];
@@ -1958,16 +1928,27 @@ module.exports = function (app, hexo, use, db) {
         if (type === 'qiniu' && config.qiniu && config.qiniu.domain) stripDomains.push(String(config.qiniu.domain));
         if (type === 'tencent' && config.tencent && config.tencent.domain) stripDomains.push(String(config.tencent.domain));
 
-        for (const f of files) {
-            let content = '';
-            try { content = fs.readFileSync(f, 'utf8'); } catch (_) { continue; }
-            // 统一处理 front-matter + 正文
-            const refs = extractImageReferences(content);
+        // serverless 只读 FS 没有源目录，改从 hexo.store（DB）读内容
+        const models = hexo && hexo.store && hexo.store.models;
+        if (!models) return referenced; // 防御：无 store 时返回空集合
+
+        const processDoc = (doc) => {
+            const text = (doc && (doc.raw || doc.content)) || '';
+            const refs = extractImageReferences(text);
             for (let u of refs) {
                 const key = normalizeUrlToKey(u, { localBase, stripDomains, type });
                 if (key) referenced.add(normalizeKeyForCompare(key));
             }
+        };
+
+        const postDocs = models.Post && typeof models.Post.toArray === 'function' ? models.Post.toArray() : [];
+        const pageDocs = models.Page && typeof models.Page.toArray === 'function' ? models.Page.toArray() : [];
+
+        for (const doc of postDocs) {
+            if (!includeDrafts && doc.published === false) continue; // 草稿过滤仅作用于 Post
+            processDoc(doc);
         }
+        for (const doc of pageDocs) processDoc(doc); // Page 无 published 字段，总是纳入
 
         return referenced;
     }
@@ -2040,4 +2021,7 @@ module.exports = function (app, hexo, use, db) {
         }
         return u;
     }
+
+    // 暴露给测试直接调用（不影响对外注册行为）
+    module.exports.collectReferencedImageKeys = collectReferencedImageKeys;
 };
