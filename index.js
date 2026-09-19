@@ -110,7 +110,13 @@ async function ensureSiteConfig(siteConfig, github) {
 }
 
 async function importFromGithub(github, store) {
-  const paths = await github.listTree();
+  let paths;
+  try {
+    paths = await github.listTree();
+  } catch (e) {
+    console.warn('[Hexo Pro]: 从 GitHub 列出内容失败，跳过首次导入:', e.message);
+    return;
+  }
   const mdFiles = paths.filter((p) => /^source\/.*\.(md|markdown)$/i.test(p));
   for (const p of mdFiles) {
     try {

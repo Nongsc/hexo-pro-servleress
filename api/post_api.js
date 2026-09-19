@@ -76,7 +76,11 @@ module.exports = function (app, hexo, use) {
             const post = hexo.store.findByPermalink(permalink);
             if (!post) return res.send(404, 'Post not found');
             const oldSource = post.source;
-            const newSource = '_posts/' + path.basename(post.source);
+            let newSource = '_posts/' + path.basename(post.source);
+            if (hexo.store.models.Post.find(d => d.source === newSource && d._id !== post._id).length > 0) {
+                const base = path.basename(post.source).replace(/\.(md|markdown)$/i, '');
+                newSource = `_posts/${base}-${Date.now()}.md`;
+            }
             const updated = _.cloneDeep(post);
             updated.source = newSource;
             updated.published = true;
@@ -98,7 +102,11 @@ module.exports = function (app, hexo, use) {
             const post = hexo.store.findByPermalink(permalink);
             if (!post) return res.send(404, 'Post not found');
             const oldSource = post.source;
-            const newSource = '_drafts/' + path.basename(post.source);
+            let newSource = '_drafts/' + path.basename(post.source);
+            if (hexo.store.models.Post.find(d => d.source === newSource && d._id !== post._id).length > 0) {
+                const base = path.basename(post.source).replace(/\.(md|markdown)$/i, '');
+                newSource = `_drafts/${base}-${Date.now()}.md`;
+            }
             const updated = _.cloneDeep(post);
             updated.source = newSource;
             updated.published = false;

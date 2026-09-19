@@ -90,7 +90,7 @@ module.exports = function (app, hexo, use, db) {
         }
     }
 
-    // 写入部署配置（sync 时经 githubPath('deploy') 同步 GitHub）
+    // 写入部署配置（仅存 DB，不同步 GitHub）
     function writeDeployConfig(config) {
         return hexo.siteConfig.set('deploy', JSON.stringify(config, null, 2), {
             message: 'Hexo Pro: update deploy config'
