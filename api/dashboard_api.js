@@ -1,10 +1,22 @@
-const path = require('path')
-const fs = require('hexo-fs')
-const fse = require('fs-extra');
 const _ = require('lodash')
 const axios = require('axios'); // 需要安装axios
 
 module.exports = function (app, hexo, use, db) {
+    // 从 settings 表读取 todos（type: 'todos'，payload { items: [] }）
+    function readTodos() {
+        return new Promise((resolve) => {
+            if (!db || !db.settingsDb) return resolve([]);
+            db.settingsDb.findOne({ type: 'todos' }, (err, doc) => resolve(doc ? (doc.items || []) : []));
+        });
+    }
+    // 将 todos 写入 settings 表（type: 'todos'，payload { items }）
+    function writeTodos(items) {
+        return new Promise((resolve) => {
+            if (!db || !db.settingsDb) return resolve();
+            db.settingsDb.update({ type: 'todos' }, { $set: { type: 'todos', items } }, { upsert: true }, () => resolve());
+        });
+    }
+
     // 获取文章统计数据
     use('dashboard/posts/stats', function (req, res) {
         try {
@@ -111,12 +123,22 @@ module.exports = function (app, hexo, use, db) {
     // 获取系统信息
     use('dashboard/system/info', async function (req, res) {
         try {
-            // 读取package.json获取Hexo版本
-            const packagePath = path.join(hexo.base_dir, 'node_modules/hexo/package.json')
+            // 读取本项目 package.json（不再依赖 node_modules 结构）
+            let pkg = null
             let hexoVersion = 'Unknown'
-            if (fs.existsSync(packagePath)) {
-                const packageInfo = JSON.parse(fs.readFileSync(packagePath))
-                hexoVersion = packageInfo.version
+            let plugins = []
+            try {
+                pkg = require('../package.json')
+                hexoVersion = pkg.version || 'Unknown'
+                plugins = Object.keys(pkg.dependencies || {})
+                    .filter(d => d.startsWith('hexo-'))
+                    .map(name => ({
+                        name: name,
+                        version: String(pkg.dependencies[name]).replace(/^[^\d]*/, ''),
+                        enabled: true
+                    }))
+            } catch (e) {
+                // 理论上不会发生；保持兜底值 Unknown / []
             }
 
             // 获取当前主题
@@ -124,30 +146,6 @@ module.exports = function (app, hexo, use, db) {
 
             // 获取作者信息
             const author = hexo.config.author || ''
-
-            // 获取插件列表
-            const plugins = []
-            const pluginsDir = path.join(hexo.base_dir, 'node_modules')
-            if (fs.existsSync(pluginsDir)) {
-                const dirs = fs.readdirSync(pluginsDir)
-                dirs.forEach(dir => {
-                    if (dir.startsWith('hexo-')) {
-                        const pluginPackagePath = path.join(pluginsDir, dir, 'package.json')
-                        if (fs.existsSync(pluginPackagePath)) {
-                            try {
-                                const pluginInfo = JSON.parse(fse.readFileSync(pluginPackagePath))
-                                plugins.push({
-                                    name: pluginInfo.name,
-                                    version: pluginInfo.version,
-                                    enabled: true // 默认为启用状态
-                                })
-                            } catch (e) {
-                                console.error(`读取插件${dir}信息失败:`, e)
-                            }
-                        }
-                    }
-                })
-            }
 
             // 获取最近部署时间（从部署状态表读取）
             let lastDeployTime = '未知'
@@ -170,19 +168,9 @@ module.exports = function (app, hexo, use, db) {
     })
 
     // 获取待办事项列表
-    use('dashboard/todos/list', function (req, res) {
+    use('dashboard/todos/list', async function (req, res) {
         try {
-            const todosPath = path.join(hexo.base_dir, 'todos.json')
-            let todos = []
-
-            if (fs.existsSync(todosPath)) {
-                try {
-                    todos = JSON.parse(fse.readFileSync(todosPath))
-                } catch (e) {
-                    console.error('解析待办事项文件失败:', e)
-                }
-            }
-
+            const todos = await readTodos()
             res.done(todos)
         } catch (error) {
             console.error('获取待办事项失败:', error)
@@ -191,7 +179,7 @@ module.exports = function (app, hexo, use, db) {
     })
 
     // 添加待办事项
-    use('dashboard/todos/add', function (req, res, next) {
+    use('dashboard/todos/add', async function (req, res, next) {
         if (req.method !== 'POST') return next()
 
         try {
@@ -199,16 +187,7 @@ module.exports = function (app, hexo, use, db) {
                 return res.send(400, '缺少待办事项内容')
             }
 
-            const todosPath = path.join(hexo.base_dir, 'todos.json')
-            let todos = []
-
-            if (fs.existsSync(todosPath)) {
-                try {
-                    todos = JSON.parse(fse.readFileSync(todosPath))
-                } catch (e) {
-                    console.error('解析待办事项文件失败:', e)
-                }
-            }
+            const todos = await readTodos()
 
             // 添加新待办事项
             const newTodo = {
@@ -220,8 +199,8 @@ module.exports = function (app, hexo, use, db) {
 
             todos.push(newTodo)
 
-            // 保存到文件
-            fs.writeFileSync(todosPath, JSON.stringify(todos, null, 2))
+            // 保存到 settings 表
+            await writeTodos(todos)
 
             res.done(newTodo)
         } catch (error) {
@@ -231,45 +210,31 @@ module.exports = function (app, hexo, use, db) {
     })
 
     // 切换待办事项完成状态
-    use('dashboard/todos/toggle/:id', function (req, res, next) {
+    use('dashboard/todos/toggle/:id', async function (req, res, next) {
         if (req.method !== 'PUT') {
-            console.log('[TODO TOGGLE] Method not PUT, calling next()'); // 添加日志
             return next();
         }
-    
+
         try {
             const todoId = req.params.id;
             if (!todoId) {
-                console.log('[TODO TOGGLE] Missing todoId'); // 添加日志
                 return res.send(400, '缺少待办事项 ID');
             }
-    
-            const todosPath = path.join(hexo.base_dir, 'todos.json');
-            let todos = [];
-    
-            if (fs.existsSync(todosPath)) {
-                try {
-                    todos = JSON.parse(fse.readFileSync(todosPath));
-                } catch (e) {
-                    console.error('解析待办事项文件失败:', e);
-                    return res.send(500, '处理待办事项文件失败');
-                }
-            } else {
-                 console.log(`[TODO TOGGLE] todos.json not found at: ${todosPath}`); // 添加日志
-            }
-    
+
+            const todos = await readTodos();
+
             const todoIndex = todos.findIndex(todo => todo.id === todoId);
-    
+
             if (todoIndex === -1) {
                 return res.send(404, '未找到待办事项');
             }
-    
+
             // 切换完成状态
             todos[todoIndex].completed = !todos[todoIndex].completed;
-    
-            // 保存到文件
-            fs.writeFileSync(todosPath, JSON.stringify(todos, null, 2));
-    
+
+            // 保存到 settings 表
+            await writeTodos(todos);
+
             res.done(todos[todoIndex]); // 返回更新后的待办事项
         } catch (error) {
             console.error('切换待办事项状态失败:', error);
@@ -278,7 +243,7 @@ module.exports = function (app, hexo, use, db) {
     });
 
     // 删除待办事项
-    use('dashboard/todos/delete/:id', function (req, res, next) {
+    use('dashboard/todos/delete/:id', async function (req, res, next) {
         if (req.method !== 'DELETE') return next() // 使用 DELETE 方法
 
         try {
@@ -287,27 +252,17 @@ module.exports = function (app, hexo, use, db) {
                 return res.send(400, '缺少待办事项 ID')
             }
 
-            const todosPath = path.join(hexo.base_dir, 'todos.json')
-            let todos = []
-
-            if (fs.existsSync(todosPath)) {
-                try {
-                    todos = JSON.parse(fse.readFileSync(todosPath))
-                } catch (e) {
-                    console.error('解析待办事项文件失败:', e)
-                    return res.send(500, '处理待办事项文件失败')
-                }
-            }
+            const todos = await readTodos()
 
             const initialLength = todos.length
-            todos = todos.filter(todo => todo.id !== todoId)
+            const remaining = todos.filter(todo => todo.id !== todoId)
 
-            if (todos.length === initialLength) {
+            if (remaining.length === initialLength) {
                 return res.send(404, '未找到待办事项')
             }
 
-            // 保存到文件
-            fs.writeFileSync(todosPath, JSON.stringify(todos, null, 2))
+            // 保存到 settings 表
+            await writeTodos(remaining)
 
             res.done({ success: true, message: '删除成功' })
         } catch (error) {
@@ -375,16 +330,12 @@ module.exports = function (app, hexo, use, db) {
                         }
                     }
 
-                    // 获取历史访问数据（如果有存储的话）
-                    const visitStatsPath = path.join(hexo.base_dir, 'visit_stats.json');
+                    // 获取历史访问数据（settings 表 type: 'visit-stats'）
                     let visitHistory = [];
-
-                    if (fs.existsSync(visitStatsPath)) {
-                        try {
-                            visitHistory = JSON.parse(fse.readFileSync(visitStatsPath));
-                        } catch (e) {
-                            console.error('解析访问统计历史数据失败:', e);
-                        }
+                    if (db && db.settingsDb) {
+                        const visitDoc = await new Promise((resolve) =>
+                            db.settingsDb.findOne({ type: 'visit-stats' }, (e, d) => resolve(d)));
+                        visitHistory = visitDoc ? (visitDoc.items || []) : [];
                     }
 
                     // 返回数据

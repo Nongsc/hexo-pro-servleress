@@ -97,6 +97,41 @@ module.exports = function (app, hexo, use, db) {
         });
     }
 
+    // 更新部署状态（Promise 风格，供触发路径与可丢弃尾部复用）
+    function updateStatus(update) {
+        return new Promise((resolve, reject) => {
+            deployStatusDb.update(
+                { type: 'status' },
+                { $set: update },
+                {},
+                (err) => {
+                    if (err) {
+                        console.error('更新部署状态失败:', err);
+                        reject(err);
+                    } else {
+                        resolve();
+                    }
+                }
+            );
+        });
+    }
+
+    // 追加部署日志
+    function addLog(message) {
+        const cleanMessage = stripAnsi(String(message));
+        console.log(cleanMessage);
+        deployStatusDb.findOne({ type: 'status' }, (err, status) => {
+            if (!err && status) {
+                const logs = [...status.logs, cleanMessage];
+                deployStatusDb.update(
+                    { type: 'status' },
+                    { $set: { logs: logs } },
+                    {}
+                );
+            }
+        });
+    }
+
     // 获取部署配置
     use('deploy/config', async function (req, res) {
         try {
@@ -254,27 +289,45 @@ module.exports = function (app, hexo, use, db) {
                             }
                         },
                         {},
-                        (updateErr) => {
+                        async (updateErr) => {
                             if (updateErr) {
                                 console.error('更新部署状态失败:', updateErr);
                                 return res.send(500, '更新部署状态失败');
                             }
-                            res.done({
-                                success: true,
-                                message: '部署已开始，请通过状态 API 查询进度',
-                                isDeploying: true
-                            });
-                            executeDeployAsync(hexo, deployStatusDb, config);
+                            try {
+                                // 状态写入失败也不得阻断响应路径，避免客户端请求挂起
+                                await updateStatus({ stage: 'deploying', progress: 30 }).catch((e) => {
+                                    console.error('更新部署进度状态失败:', e);
+                                });
+                                addLog('deploy.triggering');
+                                // 先触发远端 workflow，成功后再响应，避免 serverless 冻结丢失触发
+                                await triggerGithubDeploy(hexo.github, config);
+                                addLog('deploy.triggered');
+                                res.done({
+                                    success: true,
+                                    message: '部署已开始，请通过状态 API 查询进度',
+                                    isDeploying: true
+                                });
+                                executeDeployAsync(config);
+                            } catch (triggerErr) {
+                                console.error('执行部署失败:', triggerErr);
+                                // 恢复状态写入失败也不得阻断响应，保证客户端一定拿到 500
+                                await updateStatus({ isDeploying: false, stage: 'failed', error: '部署失败，请查看服务端日志' }).catch((e) => {
+                                    console.error('更新部署失败状态失败:', e);
+                                });
+                                addLog('deploy.failed');
+                                res.send(500, '部署失败，请查看服务端日志');
+                            }
                         }
                     );
                 } catch (innerErr) {
                     console.error('执行部署失败:', innerErr);
-                    return res.send(500, `执行部署失败: ${innerErr.message}`);
+                    return res.send(500, '部署失败，请查看服务端日志');
                 }
             });
         } catch (error) {
             console.error('执行部署失败:', error);
-            res.send(500, `执行部署失败: ${error.message}`);
+            res.send(500, '部署失败，请查看服务端日志');
         }
     });
 
@@ -309,48 +362,10 @@ module.exports = function (app, hexo, use, db) {
         }
     });
 
-    // 辅助函数：异步执行部署过程（触发远端 GitHub Actions）
-    function executeDeployAsync(hexo, deployStatusDb, config) {
-        const updateStatus = (update) => {
-            return new Promise((resolve, reject) => {
-                deployStatusDb.update(
-                    { type: 'status' },
-                    { $set: update },
-                    {},
-                    (err) => {
-                        if (err) {
-                            console.error('更新部署状态失败:', err);
-                            reject(err);
-                        } else {
-                            resolve();
-                        }
-                    }
-                );
-            });
-        };
-
-        const addLog = (message) => {
-            const cleanMessage = stripAnsi(String(message));
-            console.log(cleanMessage);
-            deployStatusDb.findOne({ type: 'status' }, (err, status) => {
-                if (!err && status) {
-                    const logs = [...status.logs, cleanMessage];
-                    deployStatusDb.update(
-                        { type: 'status' },
-                        { $set: { logs: logs } },
-                        {}
-                    );
-                }
-            });
-        };
-
+    // 辅助函数：写入 lastDeployTime 并记录最终完成/失败状态（可丢弃尾部，fire-and-forget）
+    function executeDeployAsync(config) {
         (async () => {
             try {
-                await updateStatus({ stage: 'deploying', progress: 30 });
-                addLog('deploy.triggering');
-                await triggerGithubDeploy(hexo.github, config);
-                addLog('deploy.triggered');
-
                 const now = new Date();
                 const formattedTime = formatDateTime(now);
                 config.lastDeployTime = now.toISOString();
@@ -368,10 +383,12 @@ module.exports = function (app, hexo, use, db) {
                 await updateStatus({
                     isDeploying: false,
                     stage: 'failed',
-                    error: error.message
+                    error: '部署失败，请查看服务端日志'
+                }).catch((e) => {
+                    console.error('更新部署失败状态失败:', e);
                 });
                 addLog('deploy.failed');
-                addLog(error.message);
+                addLog('部署失败，请查看服务端日志');
             }
         })();
     }

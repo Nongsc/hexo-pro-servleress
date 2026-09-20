@@ -15,21 +15,22 @@ const utils = require('./utils');
 const { permalink } = require('../lib/constants')
 
 
-module.exports = function (app, hexo, use) {
-    // reads admin panel settings from _admin-config.yml
-    // or writes it if it does not exist
+module.exports = function (app, hexo, use, db) {
+    // reads admin panel settings from settings 表 (type: 'admin-config', content 为 YAML 字符串)
     function getSettings() {
-        var path = hexo.base_dir + '_admin-config.yml'
-        if (!fs.existsSync(path)) {
-            hexo.log.d('admin config not found, creating one')
-            fs.writeFile(hexo.base_dir + '_admin-config.yml', '')
-            return {}
-        } else {
-            var settings = yml.load(fs.readFileSync(path))
-
-            if (!settings) return {}
-            return settings
-        }
+        return new Promise((resolve) => {
+            if (!db || !db.settingsDb) return resolve({});
+            db.settingsDb.findOne({ type: 'admin-config' }, (err, doc) => {
+                if (err || !doc) return resolve({});
+                try {
+                    var settings = yml.load(doc.content);
+                    if (!settings) return resolve({});
+                    return resolve(settings);
+                } catch (e) {
+                    return resolve({});
+                }
+            });
+        });
     }
     function tagsCategoriesAndMetadata() {
         var cats = {}
@@ -174,8 +175,16 @@ module.exports = function (app, hexo, use) {
     }
 
     function loadBlogInfoList() {
-        const blogInfoList = fs.readFileSync(path.join(hexo.base_dir, 'blogInfoList.json'));
-        return JSON.parse(blogInfoList);
+        const posts = hexo.store.models.Post.toArray();
+        const pages = hexo.store.models.Page.toArray();
+        const blogInfoList = [];
+        posts.forEach(p => {
+            blogInfoList.push({ title: p.title, content: p.content, isPage: false, isDraft: !p.published, permalink: p.permalink });
+        });
+        pages.forEach(p => {
+            blogInfoList.push({ title: p.title, content: p.content, isPage: true, isDraft: false, permalink: p.permalink });
+        });
+        return blogInfoList;
     }
     function getHighlightedTextFromHtml(content, searchPattern, contextLength = 40) {
         if (!content || content.trim() === '') {
@@ -623,8 +632,8 @@ module.exports = function (app, hexo, use) {
         return res.done(tagsCategoriesAndMetadata())
     })
 
-    use('settings/list', function (req, res, next) {
-        res.done(getSettings())
+    use('settings/list', async function (req, res, next) {
+        res.done(await getSettings())
     })
     // use('images/upload', async function (req, res, next) {
     //     if (req.method !== 'POST') return next();

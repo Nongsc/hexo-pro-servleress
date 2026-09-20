@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const jwt = require('jsonwebtoken');
+const { isServerless } = require('../lib/config');
 
 module.exports = function(app, hexo, use, db) {
   const { userDb, settingsDb } = db;
@@ -641,11 +642,27 @@ module.exports = function(app, hexo, use, db) {
     }
     
     const type = matches[1];
+
+    // serverless：头像不落盘，base64 数据作为 dataURL 直接写入用户记录
+    if (isServerless()) {
+      const avatar = `data:${type};base64,${matches[2]}`;
+      return userDb.update({ username }, { $set: { avatar, updatedAt: new Date() } }, {}, (err) => {
+        if (err) {
+          return res.done({ code: 500, msg: '更新头像信息失败' });
+        }
+        res.done({
+          code: 0,
+          msg: '头像上传成功',
+          data: { url: avatar }
+        });
+      });
+    }
+
     const imageBuffer = Buffer.from(matches[2], 'base64');
     
     // 生成文件名 - 使用avatar_前缀以便识别
     const ext = path.extname(filename);
-    const newFilename = `avatar_${username}_${Date.now()}${ext}`;
+    let newFilename = `avatar_${username}_${Date.now()}${ext}`;
     
     // 确定保存路径 - 使用图床根目录
     const imagesDir = path.join(hexo.upload_dir, 'images');

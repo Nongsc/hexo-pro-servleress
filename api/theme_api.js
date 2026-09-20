@@ -1,22 +1,5 @@
-const path = require('path');
-const fs = require('hexo-fs');
-const fse = require('fs-extra');
-const { exec } = require('child_process');
 const yaml = require('js-yaml');
 
-/**
- * 清理 public 目录，确保静态文件重新生成
- * @param {string} publicDir - public 目录路径
- */
-async function cleanPublicDir(publicDir) {
-  try {
-    if (fs.existsSync(publicDir)) {
-      await fse.emptyDir(publicDir);
-    }
-  } catch (err) {
-    console.error('[Hexo Pro] 清理 public 目录失败:', err.message);
-  }
-}
 const {
   segmentConfig,
   generateSchemaForSegment,
@@ -147,18 +130,6 @@ const BUILTIN_THEMES = [
   },
 ];
 
-function execPromise(command, options = {}) {
-  return new Promise((resolve, reject) => {
-    exec(command, { cwd: options.cwd || process.cwd(), timeout: 120000, ...options }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr || stdout || error.message));
-      } else {
-        resolve(stdout);
-      }
-    });
-  });
-}
-
 const MAX_THEME_CONFIG_SNAPSHOTS = 30
 const GLOBAL_CONFIG_SNAPSHOT_ID = '__global__site_config__'
 
@@ -249,6 +220,14 @@ function getThemeById(themeId) {
   return BUILTIN_THEMES.find((t) => t.id === themeId)
 }
 
+/**
+ * 生成主题覆盖配置的最小合法 YAML 占位符（不再读本地主题源码）。
+ * 主题将在部署构建阶段克隆，覆盖配置由 Hexo Pro 生成。
+ */
+function defaultThemeConfig(theme) {
+  return `# ${theme.name} (${theme.id}) 主题覆盖配置\n# 由 Hexo Pro 生成，部署构建阶段克隆主题后生效\n`;
+}
+
 function formatYamlParseError(error) {
   const fallback = 'YAML 语法错误'
   if (!error || typeof error !== 'object') return fallback
@@ -327,14 +306,12 @@ module.exports = function (app, hexo, use, db) {
   });
 
   // 获取当前主题信息
-  use('theme/current', function (req, res) {
+  use('theme/current', async function (req, res) {
     try {
       const themeName = hexo.config.theme || 'landscape';
-      const themesDir = path.join(hexo.base_dir, 'themes');
-      const themePath = path.join(themesDir, themeName);
-      const installed = fs.existsSync(themePath);
-
       const builtin = BUILTIN_THEMES.find((t) => t.themeDir === themeName || t.id === themeName);
+      // builtin 恒可用；否则按 siteConfig（theme:<id> 覆盖配置）判断，不再 fs.existsSync
+      const installed = builtin ? true : await isThemeInstalled(hexo, { id: themeName });
 
       res.done({
         name: themeName,
@@ -348,8 +325,8 @@ module.exports = function (app, hexo, use, db) {
     }
   });
 
-  // 一键安装主题
-  use('theme/install', function (req, res) {
+  // 一键安装主题（部署时克隆：只选定主题 + 生成覆盖配置 + 更新 _config.yml 的 theme 字段，不本地 clone）
+  use('theme/install', async function (req, res) {
     if (req.method !== 'POST') return;
 
     const { themeId } = req.body || {};
@@ -362,51 +339,41 @@ module.exports = function (app, hexo, use, db) {
       return res.send(404, '主题不存在');
     }
 
-    const baseDir = hexo.base_dir;
-    const themesDir = path.join(baseDir, 'themes');
-    const themePath = path.join(themesDir, theme.themeDir);
+    try {
+      // (a) 若无 theme:<id> 覆盖配置 → 写入默认配置
+      const existing = await hexo.siteConfig.get('theme:' + theme.id);
+      if (existing === null || existing === undefined) {
+        await hexo.siteConfig.set('theme:' + theme.id, defaultThemeConfig(theme), {
+          message: `Hexo Pro: create default theme config ${theme.id}`,
+        });
+      }
 
-    if (fs.existsSync(themePath)) {
-      return res.done({
+      // (b) 更新 _config.yml 的 theme 字段
+      const rawConfig = await hexo.siteConfig.get('site');
+      let config;
+      try {
+        config = rawConfig ? yaml.load(rawConfig) : {};
+        if (!config || typeof config !== 'object') config = {};
+      } catch (e) {
+        hexo.log.error('解析 _config.yml 失败:', e);
+        return res.send(500, '解析站点配置失败');
+      }
+
+      config.theme = theme.themeDir;
+      await hexo.siteConfig.set('site', yaml.dump(config), { message: 'Hexo Pro: install theme' });
+      hexo.log.info(`[Theme] 已选定主题 ${theme.name}（部署构建阶段克隆）`);
+      hexo.config.theme = theme.themeDir;
+
+      // (c) 返回成功
+      res.done({
         success: true,
-        message: '主题已安装',
+        message: '主题已选定，将在部署构建阶段克隆',
         themeDir: theme.themeDir,
       });
+    } catch (error) {
+      hexo.log.error('[Theme] 安装失败:', error.message);
+      res.send(500, error.message || '主题安装失败');
     }
-
-    (async () => {
-      try {
-        fse.ensureDirSync(themesDir);
-
-        // 1. git clone
-        hexo.log.info(`[Theme] 正在克隆主题 ${theme.name}...`);
-        await execPromise(`git clone -b ${theme.branch} ${theme.repo} "${themePath}"`, { cwd: baseDir });
-
-        // 2. 安装依赖
-        if (theme.dependencies && theme.dependencies.length > 0) {
-          hexo.log.info(`[Theme] 正在安装主题依赖...`);
-          await execPromise(`npm install ${theme.dependencies.join(' ')} --save`, { cwd: baseDir });
-        }
-
-        // 3. 复制主题配置到根目录作为覆盖配置
-        const themeConfigSrc = path.join(themePath, '_config.yml');
-        const themeConfigDest = path.join(baseDir, theme.configFile);
-        if (fs.existsSync(themeConfigSrc) && !fs.existsSync(themeConfigDest)) {
-          fse.copyFileSync(themeConfigSrc, themeConfigDest);
-          hexo.log.info(`[Theme] 已创建覆盖配置文件 ${theme.configFile}`);
-        }
-
-        hexo.log.info(`[Theme] 主题 ${theme.name} 安装完成`);
-        res.done({
-          success: true,
-          message: '主题安装完成',
-          themeDir: theme.themeDir,
-        });
-      } catch (error) {
-        hexo.log.error('[Theme] 安装失败:', error.message);
-        res.send(500, error.message || '主题安装失败');
-      }
-    })();
   });
 
   // 获取主题配置内容
@@ -727,8 +694,8 @@ module.exports = function (app, hexo, use, db) {
     }
   })
 
-  // 检查主题是否已安装
-  use('theme/installed', function (req, res) {
+  // 检查主题是否已安装（基于 DB/siteConfig，不再 fs.existsSync）
+  use('theme/installed', async function (req, res) {
     const themeId = req.query.themeId;
     if (!themeId) {
       return res.send(400, '缺少主题ID');
@@ -739,12 +706,11 @@ module.exports = function (app, hexo, use, db) {
       return res.done({ installed: false });
     }
 
-    const themePath = path.join(hexo.base_dir, 'themes', theme.themeDir);
     const currentTheme = hexo.config.theme;
     const isCurrent = currentTheme === theme.themeDir;
 
     res.done({
-      installed: fs.existsSync(themePath),
+      installed: await isThemeInstalled(hexo, theme),
       isCurrent,
     });
   });
@@ -763,11 +729,8 @@ module.exports = function (app, hexo, use, db) {
       return res.send(404, '主题不存在');
     }
 
-    const baseDir = hexo.base_dir;
-    const themePath = path.join(baseDir, 'themes', theme.themeDir);
-
-    // 检查主题是否已安装
-    if (!fs.existsSync(themePath)) {
+    // 检查主题是否已安装（基于 DB/siteConfig，不再 fs.existsSync）
+    if (!(await isThemeInstalled(hexo, theme))) {
       return res.send(400, '主题未安装，请先安装主题');
     }
 
@@ -806,14 +769,12 @@ module.exports = function (app, hexo, use, db) {
       // 更新内存中的配置，确保后续查询能获取正确的当前主题
       hexo.config.theme = theme.themeDir;
 
-      // 若 DB 中尚无该主题覆盖配置，则从主题源码 _config.yml 复制到 siteConfig
-      const themeConfigSrc = path.join(themePath, '_config.yml');
+      // 若 DB 中尚无该主题覆盖配置，则生成默认配置（不再读本地主题源码）
       let configCopied = false;
       const existingThemeConfig = await hexo.siteConfig.get('theme:' + theme.id);
-      if (fs.existsSync(themeConfigSrc) && (existingThemeConfig === null || existingThemeConfig === undefined)) {
-        const srcContent = fse.readFileSync(themeConfigSrc, 'utf-8');
-        await hexo.siteConfig.set('theme:' + theme.id, srcContent, {
-          message: `Hexo Pro: copy theme config ${theme.id}`,
+      if (existingThemeConfig === null || existingThemeConfig === undefined) {
+        await hexo.siteConfig.set('theme:' + theme.id, defaultThemeConfig(theme), {
+          message: `Hexo Pro: create default theme config ${theme.id}`,
         });
         hexo.log.info(`[Theme] 已创建覆盖配置 ${theme.configFile}`);
         configCopied = true;
@@ -1063,6 +1024,7 @@ module.exports.BUILTIN_THEMES = BUILTIN_THEMES;
 // 供聚焦单元测试使用（不暴露给路由层）
 module.exports._test = {
   schemaCacheId,
+  defaultThemeConfig,
   extractSchemaFromFileContent,
   readSchemaFileWithMeta,
   writeSchemaFileWithMeta,
