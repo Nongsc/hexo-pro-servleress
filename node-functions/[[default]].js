@@ -1,27 +1,22 @@
 // EdgeOne Pages Node Functions 入口（catch-all）。
 //
-// 警示：本入口未在真实 EdgeOne 平台实测。桥接契约按 Cloudflare Pages 风格
-// onRequest(context) -> Response 实现。若 EdgeOne 的 Node Functions 约定与此不同
-// （例如期望 export default app、或 context 结构不同），需据此调整。
-import serverless from 'serverless-http';
+// EdgeOne 会根据 bundle 中是否含 express/koa/hono 自动判定「框架模式」；
+// 本 app 依赖 Express，因此会被识别为框架模式，运行时直接以 Node (req,res)
+// 调用默认导出的 Express app 实例（无需 serverless-http 桥接）。
+//
+// createApp() 是异步的（DB/GitHub 初始化），而框架模式要求同步导出 app，
+// 故用外层同步 Express app 委托：首个请求时惰性初始化真正的 app 再转交。
+import express from 'express';
 import { getApp } from '../lib/app.js';
-import { requestToEvent } from '../lib/edgeone-bridge.js';
 
-let handler;
-async function getHandler() {
-  if (!handler) handler = serverless(await getApp(), { binary: true });
-  return handler;
-}
+const app = express();
 
-export default async function onRequest(context) {
-  const h = await getHandler();
-  // serverless-http v4 默认 aws provider 只认识 API Gateway 事件，需先把 Fetch
-  // Request 转成 AWS v1 事件形状，再以 (event, context) 调用。
-  const event = await requestToEvent(context.request);
-  const result = await h(event, context);
-  const body = result.isBase64Encoded ? Buffer.from(result.body, 'base64') : result.body;
-  return new Response(body, {
-    status: result.statusCode,
-    headers: result.headers,
-  });
-}
+let appPromise = null;
+app.use((req, res, next) => {
+  (appPromise || (appPromise = getApp())).then(
+    (realApp) => realApp(req, res, next),
+    next
+  );
+});
+
+export default app;

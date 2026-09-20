@@ -4,3 +4,4 @@ content/
 *.log
 data/
 uploads/
+.edgeone/

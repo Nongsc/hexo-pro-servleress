@@ -662,7 +662,7 @@ module.exports = function(app, hexo, use, db) {
     
     // 生成文件名 - 使用avatar_前缀以便识别
     const ext = path.extname(filename);
-    const newFilename = `avatar_${username}_${Date.now()}${ext}`;
+    let newFilename = `avatar_${username}_${Date.now()}${ext}`;
     
     // 确定保存路径 - 使用图床根目录
     const imagesDir = path.join(hexo.upload_dir, 'images');
