@@ -1,5 +1,6 @@
 {
   "$schema": "https://cdnstatic.tencentcs.com/edgeone/pages/docs/edgeone.schema.json",
+  "nodeVersion": "20",
   "cloudFunctions": {
     "externalNodeModules": ["ali-oss", "qiniu", "cos-nodejs-sdk-v5"],
     "includeFiles": ["www/**"]
