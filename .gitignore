@@ -4,3 +4,9 @@ content/
 *.log
 data/
 uploads/
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
+  
